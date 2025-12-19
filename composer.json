@@ -13,7 +13,7 @@
     },
     "require-dev": {
         "sof3/pharynx": "^0.3.0",
-        "phpstan/phpstan": "^1.2"
+        "phpstan/phpstan": "^2.1"
     },
     "autoload": {
         "classmap": ["src"]
