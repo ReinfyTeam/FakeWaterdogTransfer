@@ -212,7 +212,7 @@ final class Main extends PluginBase {
 					$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
 				}), 10);
 			},
-			function() {
+			function() use ($player) {
 				// just incase the player is stuck (nether glitch).
 				$player->kick("Failed to load chunks. (Prevent stuck at nether glitch)", null, "You didn't finish joining.");
 			}
