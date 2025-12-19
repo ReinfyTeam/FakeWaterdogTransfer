@@ -1,0 +1,10 @@
+---
+name: FakeWaterdogTransfer
+version: 1.0.0
+description: A fake teleport screen shown to players on changing worlds. Inspired by the WaterdogPE transfer screen.
+author: ReinfyTeam
+authors: [xqwtxon, xwertxy]
+api: 5.0.0
+main: ReinfyTeam\FakeWaterdogTransfer\Main
+src-namespace-prefix: ReinfyTeam\FakeWaterdogTransfer
+...
