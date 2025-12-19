@@ -31,7 +31,7 @@ $to = getcwd() . DIRECTORY_SEPARATOR . "build" . DIRECTORY_SEPARATOR;
 @mkdir($to, 0777, true);
 
 copyDirectory($from . "src", $to . "src");
-copyDirectory($from . "resources", $to . "resources");
+//copyDirectory($from . "resources", $to . "resources");
 
 $pluginYml = yaml_parse_file($from . "plugin.yml");
 
