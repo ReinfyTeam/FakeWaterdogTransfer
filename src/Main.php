@@ -24,6 +24,8 @@ declare(strict_types=1);
 
 namespace ReinfyTeam\FakeWaterdogTransfer;
 
+use pocketmine\plugin\PluginBase;
+use pocketmine\utils\SingletonTrait;
 use pocketmine\event\entity\EntityTeleportEvent;
 use pocketmine\event\EventPriority;
 use pocketmine\event\player\PlayerLoginEvent;
@@ -48,13 +50,19 @@ use ReflectionProperty;
 use function spl_object_id;
 
 final class Main extends PluginBase {
+	use SingletonTrait;
+	
 	/** @var array<string, DimensionIds::*> */
 	private array $applicable_worlds = [];
 
 	/** @var Compressor[] */
 	private array $known_compressors = [];
 
-	public function onEnable() : void {
+    protected function onLoad() : void {
+		self::setInstance($this);
+	}
+	
+	protected function onEnable() : void {
 		Server::getInstance()->getPluginManager()->registerEvent(PlayerLoginEvent::class, function(PlayerLoginEvent $event) : void {
 			$this->registerKnownCompressor($event->getPlayer()->getNetworkSession()->getCompressor());
 		}, EventPriority::LOWEST, $this);
@@ -148,7 +156,7 @@ final class Main extends PluginBase {
 	 * Sends a teleport screen effect to the given player.
 	 */
 	public function sendTeleportScreen(Player $player) : void {
-		$plugin = Lobby::getInstance();
+		$plugin = self::getInstance();
 		$session = $player->getNetworkSession();
 
 		if (!$player->isConnected() || !$player->isAlive()) {
@@ -179,7 +187,7 @@ final class Main extends PluginBase {
 				}
 				// Step 2: after short delay, return to actual overworld
 				$plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function() use ($player, $session, $world, $blockLocation) : void {
-					if (!$player->isConnected() || !$player->isAlive()) {
+					if (!$player->isConnected() or !$player->isAlive()) {
 						return;
 					}
 					// Sync all necessary data to avoid visual glitches
