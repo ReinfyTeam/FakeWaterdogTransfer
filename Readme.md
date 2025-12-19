@@ -1,6 +1,11 @@
 # FakeWaterdogTransfer
 A fake teleport screen shown to players on changing worlds. Inspired by the WaterdogPE transfer screen.
 
+
+https://github.com/user-attachments/assets/59fffd1b-64f7-47a2-b16c-c83cdb6ab890
+
+
+
 # Installation
 - Download this plugin on [poggit](https://poggit.pmmp.io/p/FakeWaterdogTransfer).
 - Just put this plugin in under your `plugins/` folder, and it should work!<br>
