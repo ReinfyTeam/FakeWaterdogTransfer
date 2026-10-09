@@ -1,17 +1,18 @@
-name: Release
+name: Publish plugin release
 run-name: Build Zuri.phar and Draft a release to github!
 on:
   push:
   workflow_dispatch:
 jobs:
  build-phar:
+   name: Build plugin PHAR
    permissions: write-all
    runs-on: ubuntu-latest
    if: contains(github.event.head_commit.message, 'Release')
    steps:
      - name: Checkout the repository.
        uses: actions/checkout@v6
-     - name: Setup PHP
+     - name: Set up PHP environment
        uses: pmmp/setup-php-action@3.2.0
        with:
          php-version: 8.3
@@ -21,7 +22,7 @@ jobs:
        run: "curl -sL https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/latest/download/php-cs-fixer.phar -o php-cs-fixer"
      - name: Run php-cs-fixer.
        run: "php php-cs-fixer fix src"
-     - name: Run build.php
+     - name: Build plugin PHAR
        run: "php -dphar.readonly=0 tools/build.php"
      - uses: ChanTsune/release-with-commit@v4.0.0
        id: create_release
@@ -36,7 +37,7 @@ jobs:
           prerelease: false
        env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-     - name: Upload Release Asset
+     - name: Upload plugin release asset
        id: upload-release-asset 
        continue-on-error: true
        uses: actions/upload-release-asset@v1
