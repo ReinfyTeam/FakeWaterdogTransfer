@@ -8,9 +8,9 @@ jobs:
    runs-on: ubuntu-latest
    steps:
      - name: Checkout the repository.
-       uses: actions/checkout@v6
+       uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
      - name: Set up PHP environment
-       uses: pmmp/setup-php-action@3.2.0
+       uses: pmmp/setup-php-action@3c38c259834f945351a662392836d90eb08abff0
        with:
          php-version: 8.3
          install-path: "./bin"
@@ -22,7 +22,7 @@ jobs:
      - name: Build plugin PHAR
        run: "php -dphar.readonly=0 tools/build.php"
      - name: Upload plugin PHAR artifact
-       uses: actions/upload-artifact@v7
+       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
        with:
           name: FakeWaterdogTransfer.phar
           path: FakeWaterdogTransfer.phar

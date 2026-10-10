@@ -10,9 +10,9 @@ jobs:
    if: contains(github.event.head_commit.message, 'Release')
    steps:
      - name: Checkout the repository.
-       uses: actions/checkout@v6
+       uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
      - name: Set up PHP environment
-       uses: pmmp/setup-php-action@3.2.0
+       uses: pmmp/setup-php-action@3c38c259834f945351a662392836d90eb08abff0
        with:
          php-version: 8.3
          install-path: "./bin"
@@ -23,7 +23,7 @@ jobs:
        run: "php php-cs-fixer fix src"
      - name: Build plugin PHAR
        run: "php -dphar.readonly=0 tools/build.php"
-     - uses: ChanTsune/release-with-commit@v4.0.0
+     - uses: ChanTsune/release-with-commit@5a427bc9fbc54bf678e4c0bf36f4914d138d6b15
        id: create_release
        continue-on-error: true
        with:
@@ -39,7 +39,7 @@ jobs:
      - name: Upload plugin release asset
        id: upload-release-asset 
        continue-on-error: true
-       uses: actions/upload-release-asset@v1
+       uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5
        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
        with:
