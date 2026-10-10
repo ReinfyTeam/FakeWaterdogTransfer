@@ -10,7 +10,7 @@ permissions:
 jobs:
   build-phar:
     name: Build release PHAR
-    if: contains(github.event.head_commit.message, 'Release')
+    if: startsWith(github.event.head_commit.message, 'Release ')
     uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@6606444fc32787a3e50275fdb668c2310e899740
     with:
       axolotl-ref: dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955
@@ -22,7 +22,7 @@ jobs:
 
   publish-release:
     name: Publish draft GitHub release
-    if: contains(github.event.head_commit.message, 'Release')
+    if: startsWith(github.event.head_commit.message, 'Release ')
     needs: build-phar
     runs-on: ubuntu-24.04
     permissions:
