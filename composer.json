@@ -8,14 +8,10 @@
         "build": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -p=FakeWaterdogTransfer.phar",
         "build-source": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -o=./output/"
     },
-    "require": {
-        "pocketmine/pocketmine-mp": "^5.0.0"
-    },
+    "require": {},
     "require-dev": {
+        "pocketmine/pocketmine-mp": "^5.0.0",
         "sof3/pharynx": "^0.3.0",
         "phpstan/phpstan": "^2.1"
-    },
-    "autoload": {
-        "classmap": ["src"]
     }
 }

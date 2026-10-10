@@ -1,51 +1,63 @@
 name: Publish plugin release
+
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
- build-phar:
-   name: Build plugin PHAR
-   permissions: write-all
-   runs-on: ubuntu-latest
-   if: contains(github.event.head_commit.message, 'Release')
-   steps:
-     - name: Checkout the repository.
-       uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-     - name: Set up PHP environment
-       uses: pmmp/setup-php-action@3c38c259834f945351a662392836d90eb08abff0
-       with:
-         php-version: 8.3
-         install-path: "./bin"
-         pm-version-major: 5
-     - name: Install php-cs-fixer.
-       run: "curl -sL https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/latest/download/php-cs-fixer.phar -o php-cs-fixer"
-     - name: Run php-cs-fixer.
-       run: "php php-cs-fixer fix src"
-     - name: Build plugin PHAR
-       run: "php -dphar.readonly=0 tools/build.php"
-     - uses: ChanTsune/release-with-commit@5a427bc9fbc54bf678e4c0bf36f4914d138d6b15
-       id: create_release
-       continue-on-error: true
-       with:
-          regexp: "Release (\\d+([.]\\d+)*)\n*((\\s|\\S)+)"
-          regexp_options: "us"
-          release_name: "FakeWaterdogTransfer: v$1"
-          tag_name: "v$1"
-          body: "$3"
-          draft: true
-          prerelease: false
-       env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-     - name: Upload plugin release asset
-       id: upload-release-asset 
-       continue-on-error: true
-       uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5
-       env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-       with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
-          asset_path: ./FakeWaterdogTransfer.phar
-          asset_name: FakeWaterdogTransfer.phar
-          asset_content_type: application/zip
-     - name: Codespace Cleanup
-       run: "rm -rf *"
+  build-phar:
+    name: Build release PHAR
+    if: contains(github.event.head_commit.message, 'Release')
+    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@6606444fc32787a3e50275fdb668c2310e899740
+    with:
+      axolotl-ref: dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955
+      php-version: '8.3'
+      pm-version-major: '5'
+      phpstan: max
+      artifact-name: FakeWaterdogTransfer-release-${{ github.sha }}
+      retention-days: 14
+
+  publish-release:
+    name: Publish draft GitHub release
+    if: contains(github.event.head_commit.message, 'Release')
+    needs: build-phar
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified PHAR artifact
+        uses: actions/download-artifact@v7.0.1
+        with:
+          name: FakeWaterdogTransfer-release-${{ github.sha }}
+          path: release
+
+      - name: Create draft GitHub release
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          subject="${COMMIT_MESSAGE%%$'\n'*}"
+          if [[ ! "$subject" =~ ^Release\ ([0-9]+([.][0-9]+)*)$ ]]; then
+            echo 'The commit subject must match Release x.y.z.' >&2
+            exit 2
+          fi
+          version="${BASH_REMATCH[1]}"
+          notes="${COMMIT_MESSAGE#"$subject"}"
+          notes="${notes#$'\n'}"
+          if [[ -z "$notes" ]]; then
+            notes="Release v$version"
+          fi
+          test -f release/FakeWaterdogTransfer.phar
+          gh release create "v$version" release/FakeWaterdogTransfer.phar \
+            --repo "$REPOSITORY" \
+            --target "$SHA" \
+            --title "FakeWaterdogTransfer: v$version" \
+            --notes "$notes" \
+            --draft

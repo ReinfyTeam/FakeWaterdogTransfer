@@ -1,30 +1,20 @@
 name: Build and validate plugin
+
 on:
   push:
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
- build-phar:
-   name: Build plugin PHAR
-   runs-on: ubuntu-latest
-   steps:
-     - name: Checkout the repository.
-       uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-     - name: Set up PHP environment
-       uses: pmmp/setup-php-action@3c38c259834f945351a662392836d90eb08abff0
-       with:
-         php-version: 8.3
-         install-path: "./bin"
-         pm-version-major: 5
-     - name: Install php-cs-fixer.
-       run: "curl -sL https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/latest/download/php-cs-fixer.phar -o php-cs-fixer"
-     - name: Run php-cs-fixer.
-       run: "php php-cs-fixer fix src"
-     - name: Build plugin PHAR
-       run: "php -dphar.readonly=0 tools/build.php"
-     - name: Upload plugin PHAR artifact
-       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-       with:
-          name: FakeWaterdogTransfer.phar
-          path: FakeWaterdogTransfer.phar
-     - name: Codespace Cleanup
-       run: "rm -rf *"
+  build-phar:
+    name: Build plugin PHAR
+    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@6606444fc32787a3e50275fdb668c2310e899740
+    with:
+      axolotl-ref: dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955
+      php-version: '8.3'
+      pm-version-major: '5'
+      phpstan: max
+      retention-days: 14
