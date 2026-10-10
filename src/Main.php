@@ -127,10 +127,10 @@ final class Main extends PluginBase {
 	 * @param DimensionIds::* $dimension_id
 	 */
 	private function registerHackToWorld(World $world, int $dimension_id) : void {
-		static $_dimension_id = new ReflectionProperty(ChunkCache::class, "dimensionId");
+		$dimensionProperty = new ReflectionProperty(ChunkCache::class, "dimensionId");
 		foreach ($this->known_compressors as $compressor) {
 			$chunk_cache = ChunkCache::getInstance($world, $compressor);
-			$_dimension_id->setValue($chunk_cache, $dimension_id);
+			$dimensionProperty->setValue($chunk_cache, $dimension_id);
 		}
 	}
 
@@ -159,7 +159,7 @@ final class Main extends PluginBase {
 		$plugin = self::getInstance();
 		$session = $player->getNetworkSession();
 
-		if (!$player->isConnected() || !$player->isAlive()) {
+		if (!$this->isPlayerConnected($player) || !$this->isPlayerAlive($player)) {
 			return;
 		}
 
@@ -181,13 +181,13 @@ final class Main extends PluginBase {
 		$x = $position->getFloorX() >> 4;
 		$z = $position->getFloorZ() >> 4;
 		$world->orderChunkPopulation($x, $z, null)->onCompletion(
-			function(Chunk $chunk) use ($player, $x, $z, $world, $plugin, $session, $blockLocation) : void {
-				if (!$player->isConnected()) {
+			function(Chunk $chunk) use ($player, $world, $plugin, $session, $blockLocation) : void {
+				if (!$this->isPlayerConnected($player)) {
 					return;
 				}
 				// Step 2: after short delay, return to actual overworld
 				$plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function() use ($player, $session, $world, $blockLocation) : void {
-					if (!$player->isConnected() or !$player->isAlive()) {
+					if (!$this->isPlayerConnected($player) || !$this->isPlayerAlive($player)) {
 						return;
 					}
 					// Sync all necessary data to avoid visual glitches
@@ -217,5 +217,13 @@ final class Main extends PluginBase {
 				$player->kick("Failed to load chunks. (Prevent stuck at nether glitch)", null, "You didn't finish joining.");
 			}
 		);
+	}
+
+	private function isPlayerConnected(Player $player) : bool {
+		return $player->isConnected();
+	}
+
+	private function isPlayerAlive(Player $player) : bool {
+		return $player->isAlive();
 	}
 }

@@ -1,9 +1,10 @@
 {
     "name": "reinfyteam/fakewaterdogtransfer",
-    "license": "LGPL-3.0",
+    "description": "A fake teleport screen shown to players when changing worlds.",
+    "license": "LGPL-2.1-only",
     "type": "pocketmine-plugin",
     "scripts": {
-        "analyze": "vendor/bin/phpstan",
+        "analyze": "vendor/bin/phpstan analyse src --level=max",
         "build": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -p=FakeWaterdogTransfer.phar",
         "build-source": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -o=./output/"
     },
