@@ -29,7 +29,7 @@ jobs:
       contents: write
     steps:
       - name: Download verified PHAR artifact
-        uses: actions/download-artifact@v7.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: FakeWaterdogTransfer-release-${{ github.sha }}
           path: release
