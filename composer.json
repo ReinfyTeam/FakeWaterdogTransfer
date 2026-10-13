@@ -3,6 +3,13 @@
     "description": "A fake teleport screen shown to players when changing worlds.",
     "license": "LGPL-2.1-only",
     "type": "pocketmine-plugin",
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/axolotl-pm/PocketMine-MP",
+            "no-api": true
+        }
+    ],
     "scripts": {
         "analyze": "vendor/bin/phpstan analyse src --level=max",
         "build": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -p=FakeWaterdogTransfer.phar",
@@ -10,7 +17,7 @@
     },
     "require": {},
     "require-dev": {
-        "pocketmine/pocketmine-mp": "^5.0.0",
+        "axolotl-pm/pocketmine-mp": "5.49.1",
         "sof3/pharynx": "^0.3.0",
         "phpstan/phpstan": "^2.1"
     }
