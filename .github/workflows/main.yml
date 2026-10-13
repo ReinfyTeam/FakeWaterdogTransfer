@@ -11,7 +11,7 @@ permissions:
 jobs:
   build-phar:
     name: Build plugin PHAR
-    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@85f0ee8363e7e2609e7b88f1fdac186927435371
+    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@f89c929de25ea5e45418b8caeb688db77d97c2f6
     with:
       axolotl-ref: dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955
       php-version: '8.3'
