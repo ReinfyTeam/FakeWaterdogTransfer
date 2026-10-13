@@ -1,4 +1,4 @@
-name: Build and validate plugin
+name: Build and validate FakeWaterdogTransfer plugin
 
 on:
   push:
