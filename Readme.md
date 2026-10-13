@@ -14,7 +14,7 @@ The plugin is intended for PocketMine-MP. Compatibility with unofficial server v
 
 ## Installation
 
-1. Download the latest compatible `FakeWaterdogTransfer.phar` from [Poggit](https://poggit.pmmp.io/p/FakeWaterdogTransfer) or a ReinfyTeam release when one is available.
+1. Download the latest compatible `FakeWaterdogTransfer.phar` from [Poggit](https://poggit.pmmp.io/p/FakeWaterdogTransfer) or the [ReinfyTeam v1.0.0 release](https://github.com/ReinfyTeam/FakeWaterdogTransfer/releases/tag/v1.0.0).
 2. Copy the PHAR into the server's `plugins/` directory.
 3. Start the server and review the startup log for the plugin enable message.
 4. Change a player's world through the relevant world-management plugin and confirm that the expected transfer screen is displayed.
@@ -41,7 +41,7 @@ Before using a locally built artifact, inspect its manifest and load it in an is
 
 ## Releases
 
-The repository's release workflow builds a verified PHAR when the commit subject matches `Release x.y.z` and creates a draft GitHub release for review. Keep release commits focused, review the generated artifact and publish only after the relevant runtime checks pass.
+The repository's release workflow builds a verified PHAR when the commit subject matches `Release x.y.z` and creates a draft GitHub release for review. The v1.0.0 release was verified on Axolotl-PM `5.49.1` with a connected world-transfer probe. Keep future release commits focused, review the generated artifact and publish only after the relevant runtime checks pass.
 
 ## Support and contributing
 
