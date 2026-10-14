@@ -146,10 +146,16 @@ final class Main extends PluginBase {
 	}
 
 	/**
-	 * Unregisters the teleport screen effect from the given world.
+	 * Unregisters the teleport screen effect from the given world and restores
+	 * the default dimension used for its chunk cache.
 	 */
 	public function unapplyFromWorld(string $world_folder_name) : void {
 		unset($this->applicable_worlds[$world_folder_name]);
+
+		$world = Server::getInstance()->getWorldManager()->getWorldByName($world_folder_name);
+		if ($world !== null) {
+			$this->registerHackToWorld($world, DimensionIds::OVERWORLD);
+		}
 	}
 
 	/**
