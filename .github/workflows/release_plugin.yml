@@ -11,14 +11,13 @@ jobs:
   build-phar:
     name: Build release PHAR
     if: startsWith(github.event.head_commit.message, 'Release ')
-    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@3dedda2a1f6e42885aa680aaadeebacbc0f62733
+    uses: NhanAZ/DevTools/.github/workflows/build-plugin.yml@v2
     with:
-      axolotl-ref: dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955
-      php-version: '8.3'
+      axolotl-ref: e881fc1bc1c401545baf6bd1f824e41ff3f57bd1
+      php-version: '8.4'
       pm-version-major: '5'
       phpstan: max
       artifact-name: FakeWaterdogTransfer-release-${{ github.sha }}
-      retention-days: 14
 
   publish-release:
     name: Publish draft GitHub release

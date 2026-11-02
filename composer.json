@@ -17,7 +17,7 @@
     },
     "require": {},
     "require-dev": {
-        "axolotl-pm/pocketmine-mp": "5.49.1",
+        "axolotl-pm/pocketmine-mp": "5.51.1",
         "sof3/pharynx": "^0.3.0",
         "phpstan/phpstan": "^2.1"
     }
