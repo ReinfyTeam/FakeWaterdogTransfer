@@ -35,7 +35,7 @@ composer analyze
 composer build
 ```
 
-The build workflow uses [DevTools](https://github.com/AxolotlBucketLabs/DevTools) to package and validate the plugin PHAR. The workflow pins the builder revision used by CI; this user-facing guide names the tool without copying that CI pin.
+The build workflow uses [DevTools](https://github.com/AxolotlBucketLabs/DevTools) to package and validate the plugin PHAR. The workflow uses the maintained DevTools latest channel used by CI; this user-facing guide names the tool without copying that CI pin.
 
 Before using a locally built artifact, inspect its manifest and load it in an isolated PocketMine-MP-compatible server data directory. Do not overwrite a live server world, `plugin_data` directory or database during testing.
 
