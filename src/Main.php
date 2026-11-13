@@ -99,8 +99,12 @@ final class Main extends PluginBase {
 	
 	protected function onEnable() : void {
 		$this->saveDefaultConfig();
-		$this->reloadConfig();
-		$this->loadConfig();
+
+		$this->maxConcurrentTransfers = (int) ($this->getConfig()->get("max-concurrent-transfers") ?? 10);
+		if ($this->maxConcurrentTransfers < 1) {
+			$this->maxConcurrentTransfers = 1;
+		}
+
 		Server::getInstance()->getPluginManager()->registerEvent(PlayerLoginEvent::class, function(PlayerLoginEvent $event) : void {
 			$this->registerKnownCompressor($event->getPlayer()->getNetworkSession()->getCompressor());
 		}, EventPriority::LOWEST, $this);
@@ -147,24 +151,10 @@ final class Main extends PluginBase {
 		}, EventPriority::LOWEST, $this);
 
 		// Periodic cleanup of stuck transfers and processing of queued transfers
-		Server::getInstance()->getScheduler()->scheduleRepeatingTask(new ClosureTask(function () : void {
+		$this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function () : void {
 			$this->processTransferQueue();
 			$this->cleanupStuckTransfers();
 		}), 20); // every second
-	}
-
-	/**
-	 * Load configuration values from config.yml
-	 */
-	private function loadConfig() : void {
-		$this->maxConcurrentTransfers = (int) ($this->config["max-concurrent-transfers"] ?? 10);
-		if ($this->maxConcurrentTransfers < 1) {
-			$this->maxConcurrentTransfers = 1;
-		}
-	}
-
-	private function reloadConfig() : void {
-		$this->config = $this->getConfig()->getAll();
 	}
 
 	/**
@@ -253,7 +243,7 @@ final class Main extends PluginBase {
 				}
 
 				if (isset($state->timeoutTask)) {
-					Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+					self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
 				}
 				unset($this->transferring[$name]);
 				$this->activeTransferCount--;
@@ -261,7 +251,7 @@ final class Main extends PluginBase {
 		}
 	}
 
-	/**
+	
 	private function registerKnownCompressor(Compressor $compressor) : void {
 		if (isset($this->known_compressors[$id = spl_object_id($compressor)])) {
 			return;
@@ -451,7 +441,7 @@ final class Main extends PluginBase {
 		if (isset($this->transferring[$name])) {
 			$state = $this->transferring[$name];
 			if (isset($state->timeoutTask)) {
-				Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+				self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
 			}
 			unset($this->transferring[$name]);
 			$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
@@ -467,7 +457,7 @@ final class Main extends PluginBase {
 		}
 		$state = $this->transferring[$name];
 		if (isset($state->timeoutTask)) {
-			Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+			self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
 		}
 		unset($this->transferring[$name]);
 		$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
