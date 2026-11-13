@@ -1,0 +1,20 @@
+---
+# FakeWaterdogTransfer Configuration
+# Optimized for 100+ player servers
+
+# Maximum concurrent transfers to prevent chunk loading storms
+# When this limit is reached, additional transfers are queued
+max-concurrent-transfers: 15
+
+# Chunk loading radius around player during transfer (1-5)
+# radius 1 = 3x3 = 9 chunks, radius 2 = 5x5 = 25 chunks, etc.
+# Higher values = smoother transfer but more server load
+chunk-radius: 2
+
+# Ticks to wait before returning to Overworld after chunks load
+# 20 ticks = 1 second. Increase if players still see unloaded chunks.
+return-delay-ticks: 10
+
+# Seconds before a stuck transfer is force-cancelled
+# Prevents players from being stuck in Nether dimension forever
+transfer-timeout-seconds: 30

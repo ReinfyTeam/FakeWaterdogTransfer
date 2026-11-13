@@ -44,25 +44,63 @@ use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\player\Player;
 use pocketmine\scheduler\ClosureTask;
 use pocketmine\Server;
-use pocketmine\world\format\Chunk;
 use pocketmine\world\World;
 use ReflectionProperty;
 use function spl_object_id;
+use function time;
+
+/**
+ * Tracks an in-progress transfer for a player.
+ */
+final class TransferState {
+	public int $startTime;
+	public int $chunkRadius;
+	public int $totalChunks;
+	public int $chunksLoaded;
+	public bool $completed;
+	public ?ClosureTask $timeoutTask = null;
+
+	public function __construct(int $startTime, int $chunkRadius, int $totalChunks) {
+		$this->startTime = $startTime;
+		$this->chunkRadius = $chunkRadius;
+		$this->totalChunks = $totalChunks;
+		$this->chunksLoaded = 0;
+		$this->completed = false;
+	}
+}
 
 final class Main extends PluginBase {
 	use SingletonTrait;
-	
+
 	/** @var array<string, DimensionIds::*> */
 	private array $applicable_worlds = [];
 
 	/** @var Compressor[] */
 	private array $known_compressors = [];
 
+	/** @var array<string, TransferState> */
+	private array $transferring = [];
+
+	/** @var array<string, mixed> */
+	private array $config = [];
+
+	/** @var int Maximum concurrent transfers to prevent chunk loading storms */
+	private int $maxConcurrentTransfers = 10;
+
+	/** @var int Currently active transfer count */
+	private int $activeTransferCount = 0;
+
+	/** @var array<string, Player> Queue of player names waiting to transfer */
+	private array $transferQueue = [];
+
     protected function onLoad() : void {
 		self::setInstance($this);
 	}
 	
 	protected function onEnable() : void {
+		$this->saveDefaultConfig();
+		$this->reloadConfig();
+		$this->loadConfig();
 		Server::getInstance()->getPluginManager()->registerEvent(PlayerLoginEvent::class, function(PlayerLoginEvent $event) : void {
 			$this->registerKnownCompressor($event->getPlayer()->getNetworkSession()->getCompressor());
 		}, EventPriority::LOWEST, $this);
@@ -84,6 +122,19 @@ final class Main extends PluginBase {
 				return;
 			}
 
+			$name = $entity->getName();
+
+			// Already transferring - ignore duplicate teleport events
+			if (isset($this->transferring[$name])) {
+				return;
+			}
+
+			// Rate limiting: if at max concurrent transfers, queue this player
+			if ($this->activeTransferCount >= $this->maxConcurrentTransfers) {
+				$this->transferQueue[$name] = $entity;
+				return;
+			}
+
 			$from = $event->getFrom()->getWorld();
 			$to = $event->getTo()->getWorld();
 
@@ -92,13 +143,125 @@ final class Main extends PluginBase {
 				return;
 			}
 
-			$this->sendTeleportScreen($entity);
+			$this->startTransfer($entity);
 		}, EventPriority::LOWEST, $this);
+
+		// Periodic cleanup of stuck transfers and processing of queued transfers
+		Server::getInstance()->getScheduler()->scheduleRepeatingTask(new ClosureTask(function () : void {
+			$this->processTransferQueue();
+			$this->cleanupStuckTransfers();
+		}), 20); // every second
 	}
 
 	/**
-	 * @internal
+	 * Load configuration values from config.yml
 	 */
+	private function loadConfig() : void {
+		$this->maxConcurrentTransfers = (int) ($this->config["max-concurrent-transfers"] ?? 10);
+		if ($this->maxConcurrentTransfers < 1) {
+			$this->maxConcurrentTransfers = 1;
+		}
+	}
+
+	private function reloadConfig() : void {
+		$this->config = $this->getConfig()->getAll();
+	}
+
+	/**
+	 * Start a transfer sequence for a player.
+	 */
+	private function startTransfer(Player $player) : void {
+		$name = $player->getName();
+		$now = time();
+
+		$chunkRadius = (int) ($this->config["chunk-radius"] ?? 2);
+		if ($chunkRadius < 1) {
+			$chunkRadius = 1;
+		}
+		if ($chunkRadius > 5) {
+			$chunkRadius = 5;
+		}
+
+		$diameter = ($chunkRadius * 2) + 1;
+		$totalChunks = $diameter * $diameter;
+
+		$this->transferring[$name] = new TransferState($now, $chunkRadius, $totalChunks);
+		$this->activeTransferCount++;
+
+		$this->sendTeleportScreen($player, $this->transferring[$name]);
+	}
+
+	/**
+	 * Process queued transfers when slots become available.
+	 */
+	private function processTransferQueue() : void {
+		if ($this->activeTransferCount >= $this->maxConcurrentTransfers) {
+			return;
+		}
+
+		while ($this->activeTransferCount < $this->maxConcurrentTransfers && count($this->transferQueue) > 0) {
+			$name = array_key_first($this->transferQueue);
+			$player = $this->transferQueue[$name];
+			unset($this->transferQueue[$name]);
+
+			// Player may have disconnected while queued
+			if (!$player instanceof Player || !$player->isConnected() || !$player->isAlive()) {
+				continue;
+			}
+
+			// Already transferred or state cleaned up
+			if (isset($this->transferring[$name])) {
+				continue;
+			}
+
+			$this->startTransfer($player);
+		}
+	}
+
+	/**
+	 * Clean up transfers that have been stuck too long (timeout protection).
+	 */
+	private function cleanupStuckTransfers() : void {
+		$timeout = (int) ($this->config["transfer-timeout-seconds"] ?? 30);
+		$now = time();
+
+		foreach ($this->transferring as $name => $state) {
+			if ($state->completed) {
+				continue;
+			}
+
+			if (($now - $state->startTime) > $timeout) {
+				$player = Server::getInstance()->getPlayerExact($name);
+				if ($player !== null && $player->isConnected() && $player->isAlive()) {
+					// Force return to overworld to prevent stuck-at-nether glitch
+					$session = $player->getNetworkSession();
+					$session->sendDataPacket(ChangeDimensionPacket::create(
+						DimensionIds::OVERWORLD,
+						$player->getPosition(),
+						false,
+						null
+					));
+					$session->sendDataPacket(PlayerActionPacket::create(
+						$player->getId(),
+						PlayerAction::DIMENSION_CHANGE_ACK,
+						BlockPosition::fromVector3($player->getLocation()),
+						BlockPosition::fromVector3($player->getLocation()),
+						0
+					));
+					$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
+					$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
+				}
+
+				if (isset($state->timeoutTask)) {
+					Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+				}
+				unset($this->transferring[$name]);
+				$this->activeTransferCount--;
+			}
+		}
+	}
+
+	/**
 	private function registerKnownCompressor(Compressor $compressor) : void {
 		if (isset($this->known_compressors[$id = spl_object_id($compressor)])) {
 			return;
@@ -160,69 +323,174 @@ final class Main extends PluginBase {
 
 	/**
 	 * Sends a teleport screen effect to the given player.
+	 *
+	 * Uses the Nether -> Overworld dimension change (like HiveMC) to show a loading/portal
+	 * screen while chunks load in the background, preventing players from seeing unloaded
+	 * chunks during transfers.
+	 *
+	 * Optimized for 100+ players with configurable chunk radius and transfer rate limiting.
 	 */
-	public function sendTeleportScreen(Player $player) : void {
+	public function sendTeleportScreen(Player $player, TransferState $state) : void {
 		$plugin = self::getInstance();
 		$session = $player->getNetworkSession();
+		$name = $player->getName();
+		$chunkRadius = $state->chunkRadius;
+		$chunkX = (int) ($player->getFloorX() >> 4);
+		$chunkZ = (int) ($player->getFloorZ() >> 4);
 
-		if (!$this->isPlayerConnected($player) || !$this->isPlayerAlive($player)) {
+		if (!$player->isConnected() || !$player->isAlive()) {
+			$this->finishTransfer($name);
 			return;
 		}
 
-		$position = $player->getPosition();
-		$blockLocation = BlockPosition::fromVector3($player->getLocation());
-		$world = $player->getWorld();
-
-		// Step 1: send dimension change to a different dimension (Nether)
+		// Step 1: send dimension change to Nether (triggers portal/loading screen on client)
 		$session->sendDataPacket(ChangeDimensionPacket::create(
 			DimensionIds::NETHER,
-			$position,
+			$player->getPosition(),
 			false,
 			null
 		));
 
-		$player->getNetworkSession()->sendDataPacket(PlayerActionPacket::create($player->getId(), PlayerAction::DIMENSION_CHANGE_ACK, $blockLocation, $blockLocation, 0));
+		$blockLocation = BlockPosition::fromVector3($player->getLocation());
+		$session->sendDataPacket(PlayerActionPacket::create($player->getId(), PlayerAction::DIMENSION_CHANGE_ACK, $blockLocation, $blockLocation, 0));
 		$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
 
-		$x = $position->getFloorX() >> 4;
-		$z = $position->getFloorZ() >> 4;
-		$world->orderChunkPopulation($x, $z, null)->onCompletion(
-			function(Chunk $chunk) use ($player, $world, $plugin, $session, $blockLocation) : void {
-				if (!$this->isPlayerConnected($player)) {
+		// Step 2: Order chunk population for the configured radius around the player
+		// so chunks load while in "Nether". This prevents slow chunk loading on return.
+		$onAllChunksLoaded = function () use ($player, $session, $name, $state, $plugin): void {
+			if (!$player->isConnected() || !$player->isAlive()) {
+				$this->finishTransfer($name);
+				return;
+			}
+
+			$delay = (int) ($this->config["return-delay-ticks"] ?? 10);
+			$plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function () use ($player, $session, $name): void {
+				if (!$player->isConnected() || !$player->isAlive()) {
+					$this->finishTransfer($name);
 					return;
 				}
-				// Step 2: after short delay, return to actual overworld
-				$plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function() use ($player, $session, $world, $blockLocation) : void {
-					if (!$this->isPlayerConnected($player) || !$this->isPlayerAlive($player)) {
-						return;
-					}
-					// Sync all necessary data to avoid visual glitches
-					$player->getNetworkSession()->syncGameMode($player->getGamemode());
-					$player->getNetworkSession()->syncAbilities($player);
-					$player->getNetworkSession()->syncAdventureSettings();
-					$player->getNetworkSession()->syncViewAreaRadius($player->getViewDistance());
-					$player->getNetworkSession()->syncPlayerSpawnPoint($player->getSpawn());
-					$player->getNetworkSession()->syncAvailableCommands();
-					$player->getNetworkSession()->onEnterWorld();
-					$player->getNetworkSession()->syncPlayerList($world->getPlayers());
 
-					$session->sendDataPacket(ChangeDimensionPacket::create(
-						DimensionIds::OVERWORLD,
-						$player->getPosition(),
-						false,
-						null
-					));
+				// Sync all necessary data to avoid visual glitches
+				$session->syncGameMode($player->getGamemode());
+				$session->syncAbilities($player);
+				$session->syncAdventureSettings();
+				$session->syncViewAreaRadius($player->getViewDistance());
+				$session->syncPlayerSpawnPoint($player->getSpawn());
+				$session->syncAvailableCommands();
+				$session->onEnterWorld();
+				$world = $player->getWorld();
+				$session->syncPlayerList($world->getPlayers());
 
-					$player->getNetworkSession()->sendDataPacket(PlayerActionPacket::create($player->getId(), PlayerAction::DIMENSION_CHANGE_ACK, $blockLocation, $blockLocation, 0));
-					$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
-					$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
-				}), 10);
-			},
-			function() use ($player) {
-				// just incase the player is stuck (nether glitch).
+				// Return to Overworld dimension
+				$session->sendDataPacket(ChangeDimensionPacket::create(
+					DimensionIds::OVERWORLD,
+					$player->getPosition(),
+					false,
+					null
+				));
+
+				$session->sendDataPacket(PlayerActionPacket::create(
+					$player->getId(),
+					PlayerAction::DIMENSION_CHANGE_ACK,
+					BlockPosition::fromVector3($player->getLocation()),
+					BlockPosition::fromVector3($player->getLocation()),
+					0
+				));
+				$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
+				$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
+
+				$this->finishTransfer($name);
+			}), $delay);
+		};
+
+		$onChunkError = function () use ($name): void {
+			$this->finishTransfer($name);
+			$player = Server::getInstance()->getPlayerExact($name);
+			if ($player !== null && $player->isConnected() && $player->isAlive()) {
 				$player->kick("Failed to load chunks. (Prevent stuck at nether glitch)", null, "You didn't finish joining.");
 			}
-		);
+		};
+
+		$remaining = $state->totalChunks;
+		$completionChecker = function () use ($state, $onAllChunksLoaded, $onChunkError, &$remaining): void {
+			if ($state->completed) {
+				return;
+			}
+			$remaining--;
+			if ($remaining <= 0) {
+				$state->completed = true;
+				$onAllChunksLoaded();
+			}
+		};
+
+		for ($dx = -$chunkRadius; $dx <= $chunkRadius; $dx++) {
+			for ($dz = -$chunkRadius; $dz <= $chunkRadius; $dz++) {
+				$cx = $chunkX + $dx;
+				$cz = $chunkZ + $dz;
+				$world = $player->getWorld();
+				$world->orderChunkPopulation($cx, $cz, null)->onCompletion(
+					$completionChecker,
+					$onChunkError
+				);
+			}
+		}
+
+		// Set timeout task to prevent stuck transfers
+		$timeoutSeconds = (int) ($this->config["transfer-timeout-seconds"] ?? 30);
+		$state->timeoutTask = $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function () use ($name): void {
+			if (isset($this->transferring[$name]) && !$this->transferring[$name]->completed) {
+				$this->forceFinishTransfer($name);
+			}
+		}), $timeoutSeconds * 20);
+	}
+
+	/**
+	 * Mark a transfer as finished and decrement active counter.
+	 */
+	private function finishTransfer(string $name) : void {
+		if (isset($this->transferring[$name])) {
+			$state = $this->transferring[$name];
+			if (isset($state->timeoutTask)) {
+				Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+			}
+			unset($this->transferring[$name]);
+			$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
+		}
+	}
+
+	/**
+	 * Force-finish a stuck transfer (timeout).
+	 */
+	private function forceFinishTransfer(string $name) : void {
+		if (!isset($this->transferring[$name])) {
+			return;
+		}
+		$state = $this->transferring[$name];
+		if (isset($state->timeoutTask)) {
+			Server::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+		}
+		unset($this->transferring[$name]);
+		$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
+
+		$player = Server::getInstance()->getPlayerExact($name);
+		if ($player !== null && $player->isConnected() && $player->isAlive()) {
+			$session = $player->getNetworkSession();
+			$session->sendDataPacket(ChangeDimensionPacket::create(
+				DimensionIds::OVERWORLD,
+				$player->getPosition(),
+				false,
+				null
+			));
+			$session->sendDataPacket(PlayerActionPacket::create(
+				$player->getId(),
+				PlayerAction::DIMENSION_CHANGE_ACK,
+				BlockPosition::fromVector3($player->getLocation()),
+				BlockPosition::fromVector3($player->getLocation()),
+				0
+			));
+			$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
+			$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
+		}
 	}
 
 	private function isPlayerConnected(Player $player) : bool {
