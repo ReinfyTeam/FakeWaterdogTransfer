@@ -43,6 +43,7 @@ use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\player\Player;
 use pocketmine\scheduler\ClosureTask;
+use pocketmine\scheduler\TaskHandler;
 use pocketmine\Server;
 use pocketmine\world\World;
 use ReflectionProperty;
@@ -58,7 +59,7 @@ final class TransferState {
 	public int $totalChunks;
 	public int $chunksLoaded;
 	public bool $completed;
-	public ?ClosureTask $timeoutTask = null;
+	public ?TaskHandler $timeoutTask = null;
 
 	public function __construct(int $startTime, int $chunkRadius, int $totalChunks) {
 		$this->startTime = $startTime;
@@ -243,7 +244,7 @@ final class Main extends PluginBase {
 				}
 
 				if (isset($state->timeoutTask)) {
-					self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+					$state->timeoutTask->cancel();
 				}
 				unset($this->transferring[$name]);
 				$this->activeTransferCount--;
@@ -325,8 +326,8 @@ final class Main extends PluginBase {
 		$session = $player->getNetworkSession();
 		$name = $player->getName();
 		$chunkRadius = $state->chunkRadius;
-		$chunkX = (int) ($player->getFloorX() >> 4);
-		$chunkZ = (int) ($player->getFloorZ() >> 4);
+		$chunkX = (int) ($player->getPosition()->getFloorX() >> 4);
+		$chunkZ = (int) ($player->getPosition()->getFloorZ() >> 4);
 
 		if (!$player->isConnected() || !$player->isAlive()) {
 			$this->finishTransfer($name);
@@ -441,7 +442,7 @@ final class Main extends PluginBase {
 		if (isset($this->transferring[$name])) {
 			$state = $this->transferring[$name];
 			if (isset($state->timeoutTask)) {
-				self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+				$state->timeoutTask->cancel();
 			}
 			unset($this->transferring[$name]);
 			$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
@@ -457,7 +458,7 @@ final class Main extends PluginBase {
 		}
 		$state = $this->transferring[$name];
 		if (isset($state->timeoutTask)) {
-			self::getInstance()->getScheduler()->cancelTask($state->timeoutTask->getTaskId());
+			$state->timeoutTask->cancel();
 		}
 		unset($this->transferring[$name]);
 		$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
