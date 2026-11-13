@@ -1,4 +1,26 @@
-max-concurrent-transfers: 100
-chunk-radius: 6
-return-delay-ticks: 20
+
+# FakeWaterdogTransfer Configuration
+
+# Maximum concurrent fake transfers.
+# Remaining transfers are queued until a slot is free.
+max-concurrent-transfers: 15
+
+# Required readiness radius when wait-for-full-view-distance is false.
+# 1 = 3x3 chunks, 2 = 5x5 chunks, etc.
+chunk-radius: 2
+
+# Keep the fake loading screen until every chunk in the player's
+# negotiated server-allowed view distance has reached SENT.
+# true = wait for full view distance (recommended)
+# false = wait only for chunk-radius around the player
+wait-for-full-view-distance: true
+
+# Extra ticks to retain the screen after every required chunk is sent.
+return-delay-ticks: 1
+
+# Maximum time to wait for chunks before restoring the destination dimension.
 transfer-timeout-seconds: 30
+
+# Temporary per-player chunk generation/send request concurrency during transfer.
+# The implementation clamps this setting between 4 and 16.
+transfer-chunks-per-tick: 8

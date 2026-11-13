@@ -40,13 +40,18 @@ use pocketmine\network\mcpe\protocol\StopSoundPacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
+use pocketmine\player\ChunkSelector;
 use pocketmine\player\Player;
+use pocketmine\player\UsedChunkStatus;
 use pocketmine\plugin\PluginBase;
 use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\utils\SingletonTrait;
 use pocketmine\world\World;
+use ReflectionException;
 use ReflectionProperty;
+use Throwable;
+use function array_key_first;
 use function count;
 use function floor;
 use function max;
@@ -55,10 +60,12 @@ use function spl_object_id;
 use const M_SQRT2;
 
 /**
- * State for a player whose destination chunks are still being sent.
+ * A single player's fake-dimension transfer state.
+ *
+ * The stored World and chunk coordinates are captured after the teleport
+ * has completed, so chunk readiness is checked against the destination.
  */
 final class TransferState{
-
     public ?TaskHandler $timeoutTask = null;
     public ?TaskHandler $chunkPollTask = null;
     public ?TaskHandler $returnTask = null;
@@ -67,33 +74,36 @@ final class TransferState{
     public function __construct(
         public readonly Player $player,
         public readonly World $world,
-        public readonly int $centerChunkX,
-        public readonly int $centerChunkZ,
-        public readonly int $chunkRadius
+        /** @var int[] Hashes of all chunks that must reach SENT before closing the screen */
+        public readonly array $requiredChunkHashes,
+        public readonly ?int $originalChunksPerTick
     ){}
 }
 
 final class Main extends PluginBase{
     use SingletonTrait;
 
-    /** @var array<string, DimensionIds::*> */
+    /** @var array<string, DimensionIds::*> World folder => Bedrock dimension ID */
     private array $applicableWorlds = [];
 
     /** @var array<int, Compressor> */
     private array $knownCompressors = [];
 
-    /** @var array<string, TransferState> Player name => active transfer */
+    /** @var array<string, TransferState> Player name => transfer state */
     private array $transferring = [];
 
-    /** @var array<string, Player> Player name => player waiting for a transfer slot */
+    /** @var array<string, Player> Player name => queued player */
     private array $transferQueue = [];
 
     private int $maxConcurrentTransfers = 15;
     private int $configuredChunkRadius = 2;
     private int $returnDelayTicks = 1;
     private int $transferTimeoutSeconds = 30;
+    private int $transferChunksPerTick = 8;
+    private bool $waitForFullViewDistance = true;
 
     private ?ReflectionProperty $dimensionIdProperty = null;
+    private ?ReflectionProperty $chunksPerTickProperty = null;
 
     protected function onLoad() : void{
         self::setInstance($this);
@@ -102,13 +112,7 @@ final class Main extends PluginBase{
     protected function onEnable() : void{
         $this->saveDefaultConfig();
         $this->loadSettings();
-
-        // Cache the reflection handle instead of constructing it
-        // for every world/compressor pair.
-        $this->dimensionIdProperty = new ReflectionProperty(
-            ChunkCache::class,
-            "dimensionId"
-        );
+        $this->initializeReflectionProperties();
 
         $pluginManager = $this->getServer()->getPluginManager();
 
@@ -143,7 +147,8 @@ final class Main extends PluginBase{
             $this
         );
 
-        // MONITOR avoids starting a fake screen for cancelled teleports.
+        // Run after teleport listeners have had an opportunity to cancel or
+        // modify the destination. The actual transfer starts one tick later.
         $pluginManager->registerEvent(
             EntityTeleportEvent::class,
             function(EntityTeleportEvent $event) : void{
@@ -157,18 +162,17 @@ final class Main extends PluginBase{
             PlayerQuitEvent::class,
             function(PlayerQuitEvent $event) : void{
                 $name = $event->getPlayer()->getName();
-
                 unset($this->transferQueue[$name]);
-
                 $this->finishTransfer($name);
             },
             EventPriority::MONITOR,
             $this
         );
 
+        // Ensure the standard compressor's chunk caches are also registered.
         $this->registerKnownCompressor(ZlibCompressor::getInstance());
 
-        // Process the queue frequently so a free transfer slot is not left idle.
+        // Drain the queue as soon as a transfer slot becomes available.
         $this->getScheduler()->scheduleRepeatingTask(
             new ClosureTask(function() : void{
                 $this->processTransferQueue();
@@ -179,10 +183,36 @@ final class Main extends PluginBase{
 
     protected function onDisable() : void{
         foreach(array_keys($this->transferring) as $name){
+            // Restore both the protocol dimension and the player's normal
+            // chunk request limit before the plugin is unloaded.
             $this->finishTransfer($name, null, true);
         }
 
         $this->transferQueue = [];
+    }
+
+    private function initializeReflectionProperties() : void{
+        try{
+            $this->dimensionIdProperty = new ReflectionProperty(
+                ChunkCache::class,
+                "dimensionId"
+            );
+        }catch(ReflectionException $e){
+            $this->getLogger()->critical(
+                "Cannot access ChunkCache::dimensionId; fake dimension chunk-cache mapping is unavailable: " . $e->getMessage()
+            );
+        }
+
+        try{
+            $this->chunksPerTickProperty = new ReflectionProperty(
+                Player::class,
+                "chunksPerTick"
+            );
+        }catch(ReflectionException $e){
+            $this->getLogger()->warning(
+                "Per-player chunk-send boost is unavailable on this server build: " . $e->getMessage()
+            );
+        }
     }
 
     private function loadSettings() : void{
@@ -207,14 +237,21 @@ final class Main extends PluginBase{
             5,
             min(300, (int) $config->get("transfer-timeout-seconds", 30))
         );
+
+        $this->transferChunksPerTick = max(
+            4,
+            min(16, (int) $config->get("transfer-chunks-per-tick", 8))
+        );
+
+        $this->waitForFullViewDistance = (bool) $config->get(
+            "wait-for-full-view-distance",
+            true
+        );
     }
 
     /**
-     * EntityTeleportEvent fires before Player::teleport() commits
-     * the destination position.
-     *
-     * Starting one tick later ensures getWorld() and getPosition()
-     * refer to the destination.
+     * EntityTeleportEvent is called before Player::teleport() commits the
+     * destination. Defer one tick and verify the destination afterwards.
      */
     private function handleTeleport(EntityTeleportEvent $event) : void{
         $player = $event->getEntity();
@@ -224,20 +261,20 @@ final class Main extends PluginBase{
         }
 
         $fromWorld = $event->getFrom()->getWorld();
-        $destinationWorld = $event->getTo()->getWorld();
+        $toWorld = $event->getTo()->getWorld();
 
-        if($fromWorld->getFolderName() === $destinationWorld->getFolderName()){
+        if($fromWorld === $toWorld || $fromWorld->getFolderName() === $toWorld->getFolderName()){
             return;
         }
 
         $this->getScheduler()->scheduleDelayedTask(
-            new ClosureTask(function() use ($player, $destinationWorld) : void{
+            new ClosureTask(function() use ($player, $toWorld) : void{
                 if(!$player->isConnected() || !$player->isAlive()){
                     return;
                 }
 
-                // A later teleport may have superseded this event.
-                if($player->getWorld() !== $destinationWorld){
+                // Ignore this event if another teleport superseded it.
+                if($player->getWorld() !== $toWorld){
                     return;
                 }
 
@@ -250,14 +287,19 @@ final class Main extends PluginBase{
     private function queueOrStartTransfer(Player $player) : void{
         $name = $player->getName();
 
-        // Ignore duplicate callbacks for the same destination.
-        // Discard stale state if the player has moved to another world.
+        if(!$player->isConnected() || !$player->isAlive()){
+            return;
+        }
+
         if(isset($this->transferring[$name])){
-            if($this->transferring[$name]->world === $player->getWorld()){
+            $activeState = $this->transferring[$name];
+
+            if($activeState->world === $player->getWorld()){
                 return;
             }
 
-            $this->finishTransfer($name);
+            // The player has entered another world during an existing transfer.
+            $this->finishTransfer($name, $activeState, true);
         }
 
         if(count($this->transferring) >= $this->maxConcurrentTransfers){
@@ -266,7 +308,6 @@ final class Main extends PluginBase{
         }
 
         unset($this->transferQueue[$name]);
-
         $this->startTransfer($player);
     }
 
@@ -277,55 +318,73 @@ final class Main extends PluginBase{
 
         $name = $player->getName();
         $world = $player->getWorld();
+        $position = $player->getPosition();
 
-        $chunkX = $player->getPosition()->getFloorX() >> 4;
-        $chunkZ = $player->getPosition()->getFloorZ() >> 4;
+        $chunkX = $position->getFloorX() >> 4;
+        $chunkZ = $position->getFloorZ() >> 4;
 
-        /*
-         * ChunkSelector uses a circular view-distance boundary.
-         *
-         * Keep the square readiness area inside that boundary so
-         * the plugin never waits for chunks that the negotiated
-         * view distance will not request.
-         */
-        $viewDistance = max(0, $player->getViewDistance());
-
-        $viewSafeRadius = (int) floor($viewDistance / M_SQRT2);
-
-        $chunkRadius = min(
-            $this->configuredChunkRadius,
-            $viewSafeRadius
+        // Match the exact chunk selection used by Player::orderChunks().
+        // By default, keep the fake screen until the entire negotiated view
+        // distance has been sent, rather than checking an arbitrary 3x3/5x5
+        // square that could leave most of the visible terrain still loading.
+        $clientViewDistance = max(1, $player->getViewDistance());
+        $allowedViewDistance = max(
+            1,
+            $this->getServer()->getAllowedViewDistance($clientViewDistance)
         );
+
+        $requiredChunkHashes = [];
+
+        if($this->waitForFullViewDistance){
+            $selector = new ChunkSelector();
+            foreach($selector->selectChunks($allowedViewDistance, $chunkX, $chunkZ) as $hash){
+                $requiredChunkHashes[] = $hash;
+            }
+        }else{
+            // Optional smaller readiness area for servers that prefer a
+            // shorter transition over waiting for the complete view distance.
+            $viewSafeRadius = (int) floor($allowedViewDistance / M_SQRT2);
+            $chunkRadius = min($this->configuredChunkRadius, $viewSafeRadius);
+
+            for($dx = -$chunkRadius; $dx <= $chunkRadius; ++$dx){
+                for($dz = -$chunkRadius; $dz <= $chunkRadius; ++$dz){
+                    $requiredChunkHashes[] = World::chunkHash($chunkX + $dx, $chunkZ + $dz);
+                }
+            }
+        }
+
+        $originalChunksPerTick = $this->applyTemporaryChunkSendBoost($player);
 
         $state = new TransferState(
             $player,
             $world,
-            $chunkX,
-            $chunkZ,
-            $chunkRadius
+            $requiredChunkHashes,
+            $originalChunksPerTick
         );
 
         $this->transferring[$name] = $state;
 
-        // Timeout remains active until the entire transfer is finished,
-        // including the return-delay period.
+        // Timeout stays active through both chunk delivery and return delay.
         $state->timeoutTask = $this->getScheduler()->scheduleDelayedTask(
             new ClosureTask(function() use ($name, $state) : void{
-                if($this->isCurrentTransfer($name, $state)){
-                    $this->getLogger()->warning(
-                        "Chunk-send wait timed out for {$name}; restoring the destination dimension."
-                    );
-
-                    $this->finishTransfer($name, $state, true);
+                if(!$this->isCurrentTransfer($name, $state)){
+                    return;
                 }
+
+                $this->getLogger()->warning(
+                    "Chunk-send wait timed out for {$name}; restoring the destination dimension."
+                );
+
+                $this->finishTransfer($name, $state, true);
             }),
             $this->transferTimeoutSeconds * 20
         );
 
-        // Show the fake Nether loading screen.
         $this->showFakeNetherScreen($player);
 
-        // Poll the actual player chunk-send status.
+        // The player performs normal chunk ordering after teleport. Poll the
+        // public SENT status instead of pre-generating chunks unrelated to the
+        // player's actual network send queue.
         $state->chunkPollTask = $this->getScheduler()->scheduleRepeatingTask(
             new ClosureTask(function() use ($name, $state) : void{
                 $this->pollRequiredChunks($name, $state);
@@ -335,8 +394,34 @@ final class Main extends PluginBase{
     }
 
     /**
-     * Wait until every chunk in the configured destination area
-     * has reached the SENT state for this player.
+     * Temporarily increases the number of outstanding chunk requests allowed
+     * by Player::requestChunks(). Returns the original value for restoration.
+     */
+    private function applyTemporaryChunkSendBoost(Player $player) : ?int{
+        if($this->chunksPerTickProperty === null){
+            return null;
+        }
+
+        try{
+            $original = (int) $this->chunksPerTickProperty->getValue($player);
+            $boosted = max($original, $this->transferChunksPerTick);
+
+            if($boosted !== $original){
+                $this->chunksPerTickProperty->setValue($player, $boosted);
+            }
+
+            return $original;
+        }catch(Throwable $e){
+            $this->getLogger()->warning(
+                "Could not apply temporary chunk-send boost to {$player->getName()}: " . $e->getMessage()
+            );
+            return null;
+        }
+    }
+
+    /**
+     * Wait until every required destination chunk is marked SENT by
+     * PocketMine's player chunk-send pipeline.
      */
     private function pollRequiredChunks(string $name, TransferState $state) : void{
         if(!$this->isCurrentTransfer($name, $state)){
@@ -351,19 +436,16 @@ final class Main extends PluginBase{
         }
 
         if($player->getWorld() !== $state->world){
-            // The player moved to another destination while the fake screen was active.
+            // A new destination superseded this transfer.
             $this->finishTransfer($name, $state, true);
             return;
         }
 
-        for($dx = -$state->chunkRadius; $dx <= $state->chunkRadius; ++$dx){
-            for($dz = -$state->chunkRadius; $dz <= $state->chunkRadius; ++$dz){
-                if(!$player->hasReceivedChunk(
-                    $state->centerChunkX + $dx,
-                    $state->centerChunkZ + $dz
-                )){
-                    return;
-                }
+        $usedChunks = $player->getUsedChunks();
+
+        foreach($state->requiredChunkHashes as $chunkHash){
+            if(($usedChunks[$chunkHash] ?? null) !== UsedChunkStatus::SENT){
+                return;
             }
         }
 
@@ -372,12 +454,9 @@ final class Main extends PluginBase{
         }
 
         $state->returnScheduled = true;
-
         $state->chunkPollTask?->cancel();
         $state->chunkPollTask = null;
 
-        // All required chunks have been sent. Keep the screen for the
-        // configured extra delay, then restore the destination dimension.
         $state->returnTask = $this->getScheduler()->scheduleDelayedTask(
             new ClosureTask(function() use ($name, $state) : void{
                 if(!$this->isCurrentTransfer($name, $state)){
@@ -399,7 +478,6 @@ final class Main extends PluginBase{
 
     private function showFakeNetherScreen(Player $player) : void{
         $session = $player->getNetworkSession();
-
         $position = $player->getPosition();
         $blockPosition = BlockPosition::fromVector3($player->getLocation());
 
@@ -428,10 +506,8 @@ final class Main extends PluginBase{
     }
 
     /**
-     * Restores the protocol dimension corresponding to the player's current world.
-     *
-     * The timeout path uses this same method, so it does not blindly
-     * force OVERWORLD.
+     * Restores the protocol dimension mapped to the player's current world.
+     * Worlds without an explicit mapping use OVERWORLD.
      */
     private function restoreTargetDimension(Player $player) : void{
         $session = $player->getNetworkSession();
@@ -443,7 +519,6 @@ final class Main extends PluginBase{
         $position = $player->getPosition();
         $blockPosition = BlockPosition::fromVector3($player->getLocation());
 
-        // Synchronize the player's world state before returning.
         $session->syncGameMode($player->getGamemode());
         $session->syncAbilities($player);
         $session->syncAdventureSettings();
@@ -487,7 +562,8 @@ final class Main extends PluginBase{
     }
 
     /**
-     * Releases the transfer state and optionally restores the dimension.
+     * Releases the transfer and restores the original request limit.
+     * Optionally sends the dimension restoration packets.
      */
     private function finishTransfer(
         string $name,
@@ -508,6 +584,20 @@ final class Main extends PluginBase{
 
         $player = $state->player;
 
+        // Restore the exact value captured before the temporary boost.
+        if($state->originalChunksPerTick !== null && $this->chunksPerTickProperty !== null){
+            try{
+                $this->chunksPerTickProperty->setValue(
+                    $player,
+                    $state->originalChunksPerTick
+                );
+            }catch(Throwable $e){
+                $this->getLogger()->warning(
+                    "Could not restore chunk-send rate for {$name}: " . $e->getMessage()
+                );
+            }
+        }
+
         if($restoreDimension && $player->isConnected() && $player->isAlive()){
             $this->restoreTargetDimension($player);
         }
@@ -525,7 +615,6 @@ final class Main extends PluginBase{
             }
 
             $player = $this->transferQueue[$name];
-
             unset($this->transferQueue[$name]);
 
             if(!$player->isConnected() || !$player->isAlive()){
@@ -536,8 +625,7 @@ final class Main extends PluginBase{
                 continue;
             }
 
-            // Read the current world and position when dequeued,
-            // not the position from the original teleport event.
+            // Use the player's current world and position, not stale queued data.
             $this->startTransfer($player);
         }
     }
@@ -563,11 +651,7 @@ final class Main extends PluginBase{
             return false;
         }
 
-        $this->registerHackToWorld(
-            $world,
-            $this->applicableWorlds[$folderName]
-        );
-
+        $this->registerHackToWorld($world, $this->applicableWorlds[$folderName]);
         return true;
     }
 
@@ -581,16 +665,12 @@ final class Main extends PluginBase{
 
         foreach($this->knownCompressors as $compressor){
             $chunkCache = ChunkCache::getInstance($world, $compressor);
-
-            $this->dimensionIdProperty->setValue(
-                $chunkCache,
-                $dimensionId
-            );
+            $this->dimensionIdProperty->setValue($chunkCache, $dimensionId);
         }
     }
 
     /**
-     * Maps a world folder to the dimension ID used when its chunks are sent.
+     * Maps a world folder to the dimension ID used in that world's chunk cache.
      *
      * @param DimensionIds::* $dimensionId
      */
@@ -598,20 +678,18 @@ final class Main extends PluginBase{
         $this->applicableWorlds[$worldFolderName] = $dimensionId;
 
         $world = $this->getServer()->getWorldManager()->getWorldByName($worldFolderName);
-
         if($world !== null){
             $this->registerHackToWorldIfApplicable($world);
         }
     }
 
     /**
-     * Restores the given world's chunk-cache dimension ID to OVERWORLD.
+     * Removes the custom mapping and restores the OVERWORLD chunk-cache ID.
      */
     public function unapplyFromWorld(string $worldFolderName) : void{
         unset($this->applicableWorlds[$worldFolderName]);
 
         $world = $this->getServer()->getWorldManager()->getWorldByName($worldFolderName);
-
         if($world !== null){
             $this->registerHackToWorld($world, DimensionIds::OVERWORLD);
         }
