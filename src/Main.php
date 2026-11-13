@@ -24,471 +24,596 @@ declare(strict_types=1);
 
 namespace ReinfyTeam\FakeWaterdogTransfer;
 
-use pocketmine\plugin\PluginBase;
-use pocketmine\utils\SingletonTrait;
 use pocketmine\event\entity\EntityTeleportEvent;
 use pocketmine\event\EventPriority;
 use pocketmine\event\player\PlayerLoginEvent;
+use pocketmine\event\player\PlayerQuitEvent;
 use pocketmine\event\server\LowMemoryEvent;
 use pocketmine\event\world\WorldLoadEvent;
 use pocketmine\network\mcpe\cache\ChunkCache;
 use pocketmine\network\mcpe\compression\Compressor;
 use pocketmine\network\mcpe\compression\ZlibCompressor;
 use pocketmine\network\mcpe\protocol\ChangeDimensionPacket;
-use pocketmine\network\mcpe\protocol\PlayerActionPacket;
 use pocketmine\network\mcpe\protocol\PlayStatusPacket;
+use pocketmine\network\mcpe\protocol\PlayerActionPacket;
 use pocketmine\network\mcpe\protocol\StopSoundPacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\player\Player;
+use pocketmine\plugin\PluginBase;
 use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
-use pocketmine\Server;
+use pocketmine\utils\SingletonTrait;
 use pocketmine\world\World;
 use ReflectionProperty;
+use function count;
+use function floor;
+use function max;
+use function min;
 use function spl_object_id;
-use function time;
+use const M_SQRT2;
 
 /**
- * Tracks an in-progress transfer for a player.
+ * State for a player whose destination chunks are still being sent.
  */
-final class TransferState {
-	public int $startTime;
-	public int $chunkRadius;
-	public int $totalChunks;
-	public int $chunksLoaded;
-	public bool $completed;
-	public ?TaskHandler $timeoutTask = null;
+final class TransferState{
 
-	public function __construct(int $startTime, int $chunkRadius, int $totalChunks) {
-		$this->startTime = $startTime;
-		$this->chunkRadius = $chunkRadius;
-		$this->totalChunks = $totalChunks;
-		$this->chunksLoaded = 0;
-		$this->completed = false;
-	}
+    public ?TaskHandler $timeoutTask = null;
+    public ?TaskHandler $chunkPollTask = null;
+    public ?TaskHandler $returnTask = null;
+    public bool $returnScheduled = false;
+
+    public function __construct(
+        public readonly Player $player,
+        public readonly World $world,
+        public readonly int $centerChunkX,
+        public readonly int $centerChunkZ,
+        public readonly int $chunkRadius
+    ){}
 }
 
-final class Main extends PluginBase {
-	use SingletonTrait;
+final class Main extends PluginBase{
+    use SingletonTrait;
 
-	/** @var array<string, DimensionIds::*> */
-	private array $applicable_worlds = [];
+    /** @var array<string, DimensionIds::*> */
+    private array $applicableWorlds = [];
 
-	/** @var Compressor[] */
-	private array $known_compressors = [];
+    /** @var array<int, Compressor> */
+    private array $knownCompressors = [];
 
-	/** @var array<string, TransferState> */
-	private array $transferring = [];
+    /** @var array<string, TransferState> Player name => active transfer */
+    private array $transferring = [];
 
-	/** @var array<string, mixed> */
-	private array $config = [];
+    /** @var array<string, Player> Player name => player waiting for a transfer slot */
+    private array $transferQueue = [];
 
-	/** @var int Maximum concurrent transfers to prevent chunk loading storms */
-	private int $maxConcurrentTransfers = 10;
+    private int $maxConcurrentTransfers = 15;
+    private int $configuredChunkRadius = 2;
+    private int $returnDelayTicks = 1;
+    private int $transferTimeoutSeconds = 30;
 
-	/** @var int Currently active transfer count */
-	private int $activeTransferCount = 0;
+    private ?ReflectionProperty $dimensionIdProperty = null;
 
-	/** @var array<string, Player> Queue of player names waiting to transfer */
-	private array $transferQueue = [];
+    protected function onLoad() : void{
+        self::setInstance($this);
+    }
 
-    protected function onLoad() : void {
-		self::setInstance($this);
-	}
-	
-	protected function onEnable() : void {
-		$this->saveDefaultConfig();
+    protected function onEnable() : void{
+        $this->saveDefaultConfig();
+        $this->loadSettings();
 
-		$this->maxConcurrentTransfers = (int) ($this->getConfig()->get("max-concurrent-transfers") ?? 10);
-		if ($this->maxConcurrentTransfers < 1) {
-			$this->maxConcurrentTransfers = 1;
-		}
+        // Cache the reflection handle instead of constructing it
+        // for every world/compressor pair.
+        $this->dimensionIdProperty = new ReflectionProperty(
+            ChunkCache::class,
+            "dimensionId"
+        );
 
-		Server::getInstance()->getPluginManager()->registerEvent(PlayerLoginEvent::class, function(PlayerLoginEvent $event) : void {
-			$this->registerKnownCompressor($event->getPlayer()->getNetworkSession()->getCompressor());
-		}, EventPriority::LOWEST, $this);
-		Server::getInstance()->getPluginManager()->registerEvent(WorldLoadEvent::class, function(WorldLoadEvent $event) : void {
-			$this->registerHackToWorldIfApplicable($event->getWorld());
-		}, EventPriority::LOWEST, $this);
-		Server::getInstance()->getPluginManager()->registerEvent(LowMemoryEvent::class, function(LowMemoryEvent $event) : void {
-			foreach (Server::getInstance()->getWorldManager()->getWorlds() as $world) {
-				$this->registerHackToWorldIfApplicable($world);
-			}
-		}, EventPriority::LOWEST, $this);
+        $pluginManager = $this->getServer()->getPluginManager();
 
-		// register already-registered values
-		$this->registerKnownCompressor(ZlibCompressor::getInstance());
+        $pluginManager->registerEvent(
+            PlayerLoginEvent::class,
+            function(PlayerLoginEvent $event) : void{
+                $this->registerKnownCompressor(
+                    $event->getPlayer()->getNetworkSession()->getCompressor()
+                );
+            },
+            EventPriority::LOWEST,
+            $this
+        );
 
-		Server::getInstance()->getPluginManager()->registerEvent(EntityTeleportEvent::class, function(EntityTeleportEvent $event) : void {
-			$entity = $event->getEntity();
-			if (!$entity instanceof Player) {
-				return;
-			}
+        $pluginManager->registerEvent(
+            WorldLoadEvent::class,
+            function(WorldLoadEvent $event) : void{
+                $this->registerHackToWorldIfApplicable($event->getWorld());
+            },
+            EventPriority::LOWEST,
+            $this
+        );
 
-			$name = $entity->getName();
+        $pluginManager->registerEvent(
+            LowMemoryEvent::class,
+            function(LowMemoryEvent $event) : void{
+                foreach($this->getServer()->getWorldManager()->getWorlds() as $world){
+                    $this->registerHackToWorldIfApplicable($world);
+                }
+            },
+            EventPriority::LOWEST,
+            $this
+        );
 
-			// Already transferring - ignore duplicate teleport events
-			if (isset($this->transferring[$name])) {
-				return;
-			}
+        // MONITOR avoids starting a fake screen for cancelled teleports.
+        $pluginManager->registerEvent(
+            EntityTeleportEvent::class,
+            function(EntityTeleportEvent $event) : void{
+                $this->handleTeleport($event);
+            },
+            EventPriority::MONITOR,
+            $this
+        );
 
-			// Rate limiting: if at max concurrent transfers, queue this player
-			if ($this->activeTransferCount >= $this->maxConcurrentTransfers) {
-				$this->transferQueue[$name] = $entity;
-				return;
-			}
+        $pluginManager->registerEvent(
+            PlayerQuitEvent::class,
+            function(PlayerQuitEvent $event) : void{
+                $name = $event->getPlayer()->getName();
 
-			$from = $event->getFrom()->getWorld();
-			$to = $event->getTo()->getWorld();
+                unset($this->transferQueue[$name]);
 
-			// only run effect if teleporting between worlds
-			if ($from->getFolderName() === $to->getFolderName()) {
-				return;
-			}
+                $this->finishTransfer($name);
+            },
+            EventPriority::MONITOR,
+            $this
+        );
 
-			$this->startTransfer($entity);
-		}, EventPriority::LOWEST, $this);
+        $this->registerKnownCompressor(ZlibCompressor::getInstance());
 
-		// Periodic cleanup of stuck transfers and processing of queued transfers
-		$this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function () : void {
-			$this->processTransferQueue();
-			$this->cleanupStuckTransfers();
-		}), 20); // every second
-	}
+        // Process the queue frequently so a free transfer slot is not left idle.
+        $this->getScheduler()->scheduleRepeatingTask(
+            new ClosureTask(function() : void{
+                $this->processTransferQueue();
+            }),
+            1
+        );
+    }
 
-	/**
-	 * Start a transfer sequence for a player.
-	 */
-	private function startTransfer(Player $player) : void {
-		$name = $player->getName();
-		$now = time();
+    protected function onDisable() : void{
+        foreach(array_keys($this->transferring) as $name){
+            $this->finishTransfer($name, null, true);
+        }
 
-		$chunkRadius = (int) ($this->config["chunk-radius"] ?? 2);
-		if ($chunkRadius < 1) {
-			$chunkRadius = 1;
-		}
-		if ($chunkRadius > 5) {
-			$chunkRadius = 5;
-		}
+        $this->transferQueue = [];
+    }
 
-		$diameter = ($chunkRadius * 2) + 1;
-		$totalChunks = $diameter * $diameter;
+    private function loadSettings() : void{
+        $config = $this->getConfig();
 
-		$this->transferring[$name] = new TransferState($now, $chunkRadius, $totalChunks);
-		$this->activeTransferCount++;
+        $this->maxConcurrentTransfers = max(
+            1,
+            min(100, (int) $config->get("max-concurrent-transfers", 15))
+        );
 
-		$this->sendTeleportScreen($player, $this->transferring[$name]);
-	}
+        $this->configuredChunkRadius = max(
+            1,
+            min(5, (int) $config->get("chunk-radius", 2))
+        );
 
-	/**
-	 * Process queued transfers when slots become available.
-	 */
-	private function processTransferQueue() : void {
-		if ($this->activeTransferCount >= $this->maxConcurrentTransfers) {
-			return;
-		}
+        $this->returnDelayTicks = max(
+            1,
+            min(100, (int) $config->get("return-delay-ticks", 1))
+        );
 
-		while ($this->activeTransferCount < $this->maxConcurrentTransfers && count($this->transferQueue) > 0) {
-			$name = array_key_first($this->transferQueue);
-			$player = $this->transferQueue[$name];
-			unset($this->transferQueue[$name]);
+        $this->transferTimeoutSeconds = max(
+            5,
+            min(300, (int) $config->get("transfer-timeout-seconds", 30))
+        );
+    }
 
-			// Player may have disconnected while queued
-			if (!$player instanceof Player || !$player->isConnected() || !$player->isAlive()) {
-				continue;
-			}
+    /**
+     * EntityTeleportEvent fires before Player::teleport() commits
+     * the destination position.
+     *
+     * Starting one tick later ensures getWorld() and getPosition()
+     * refer to the destination.
+     */
+    private function handleTeleport(EntityTeleportEvent $event) : void{
+        $player = $event->getEntity();
 
-			// Already transferred or state cleaned up
-			if (isset($this->transferring[$name])) {
-				continue;
-			}
+        if(!$player instanceof Player || $event->isCancelled()){
+            return;
+        }
 
-			$this->startTransfer($player);
-		}
-	}
+        $fromWorld = $event->getFrom()->getWorld();
+        $destinationWorld = $event->getTo()->getWorld();
 
-	/**
-	 * Clean up transfers that have been stuck too long (timeout protection).
-	 */
-	private function cleanupStuckTransfers() : void {
-		$timeout = (int) ($this->config["transfer-timeout-seconds"] ?? 30);
-		$now = time();
+        if($fromWorld->getFolderName() === $destinationWorld->getFolderName()){
+            return;
+        }
 
-		foreach ($this->transferring as $name => $state) {
-			if ($state->completed) {
-				continue;
-			}
+        $this->getScheduler()->scheduleDelayedTask(
+            new ClosureTask(function() use ($player, $destinationWorld) : void{
+                if(!$player->isConnected() || !$player->isAlive()){
+                    return;
+                }
 
-			if (($now - $state->startTime) > $timeout) {
-				$player = Server::getInstance()->getPlayerExact($name);
-				if ($player !== null && $player->isConnected() && $player->isAlive()) {
-					// Force return to overworld to prevent stuck-at-nether glitch
-					$session = $player->getNetworkSession();
-					$session->sendDataPacket(ChangeDimensionPacket::create(
-						DimensionIds::OVERWORLD,
-						$player->getPosition(),
-						false,
-						null
-					));
-					$session->sendDataPacket(PlayerActionPacket::create(
-						$player->getId(),
-						PlayerAction::DIMENSION_CHANGE_ACK,
-						BlockPosition::fromVector3($player->getLocation()),
-						BlockPosition::fromVector3($player->getLocation()),
-						0
-					));
-					$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
-					$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
-				}
+                // A later teleport may have superseded this event.
+                if($player->getWorld() !== $destinationWorld){
+                    return;
+                }
 
-				if (isset($state->timeoutTask)) {
-					$state->timeoutTask->cancel();
-				}
-				unset($this->transferring[$name]);
-				$this->activeTransferCount--;
-			}
-		}
-	}
+                $this->queueOrStartTransfer($player);
+            }),
+            1
+        );
+    }
 
-	
-	private function registerKnownCompressor(Compressor $compressor) : void {
-		if (isset($this->known_compressors[$id = spl_object_id($compressor)])) {
-			return;
-		}
+    private function queueOrStartTransfer(Player $player) : void{
+        $name = $player->getName();
 
-		$this->known_compressors[$id] = $compressor;
-		foreach (Server::getInstance()->getWorldManager()->getWorlds() as $world) {
-			$this->registerHackToWorldIfApplicable($world);
-		}
-	}
+        // Ignore duplicate callbacks for the same destination.
+        // Discard stale state if the player has moved to another world.
+        if(isset($this->transferring[$name])){
+            if($this->transferring[$name]->world === $player->getWorld()){
+                return;
+            }
 
-	/**
-	 * @return bool True if the hack was applied
-	 */
-	private function registerHackToWorldIfApplicable(World $world) : bool {
-		if (!isset($this->applicable_worlds[$world_name = $world->getFolderName()])) {
-			return false;
-		}
+            $this->finishTransfer($name);
+        }
 
-		$dimension_id = $this->applicable_worlds[$world_name];
-		$this->registerHackToWorld($world, $dimension_id);
-		return true;
-	}
+        if(count($this->transferring) >= $this->maxConcurrentTransfers){
+            $this->transferQueue[$name] = $player;
+            return;
+        }
 
-	/**
-	 * @param DimensionIds::* $dimension_id
-	 */
-	private function registerHackToWorld(World $world, int $dimension_id) : void {
-		$dimensionProperty = new ReflectionProperty(ChunkCache::class, "dimensionId");
-		foreach ($this->known_compressors as $compressor) {
-			$chunk_cache = ChunkCache::getInstance($world, $compressor);
-			$dimensionProperty->setValue($chunk_cache, $dimension_id);
-		}
-	}
+        unset($this->transferQueue[$name]);
 
-	/**
-	 * @param DimensionIds::* $dimension_id
-	 */
-	public function applyToWorld(string $world_folder_name, int $dimension_id) : void {
-		$this->applicable_worlds[$world_folder_name] = $dimension_id;
-		$world = Server::getInstance()->getWorldManager()->getWorldByName($world_folder_name);
-		if ($world !== null) {
-			$this->registerHackToWorldIfApplicable($world);
-		}
-	}
+        $this->startTransfer($player);
+    }
 
-	/**
-	 * Unregisters the teleport screen effect from the given world and restores
-	 * the default dimension used for its chunk cache.
-	 */
-	public function unapplyFromWorld(string $world_folder_name) : void {
-		unset($this->applicable_worlds[$world_folder_name]);
+    private function startTransfer(Player $player) : void{
+        if(!$player->isConnected() || !$player->isAlive()){
+            return;
+        }
 
-		$world = Server::getInstance()->getWorldManager()->getWorldByName($world_folder_name);
-		if ($world !== null) {
-			$this->registerHackToWorld($world, DimensionIds::OVERWORLD);
-		}
-	}
+        $name = $player->getName();
+        $world = $player->getWorld();
 
-	/**
-	 * Sends a teleport screen effect to the given player.
-	 *
-	 * Uses the Nether -> Overworld dimension change (like HiveMC) to show a loading/portal
-	 * screen while chunks load in the background, preventing players from seeing unloaded
-	 * chunks during transfers.
-	 *
-	 * Optimized for 100+ players with configurable chunk radius and transfer rate limiting.
-	 */
-	public function sendTeleportScreen(Player $player, TransferState $state) : void {
-		$plugin = self::getInstance();
-		$session = $player->getNetworkSession();
-		$name = $player->getName();
-		$chunkRadius = $state->chunkRadius;
-		$chunkX = (int) ($player->getPosition()->getFloorX() >> 4);
-		$chunkZ = (int) ($player->getPosition()->getFloorZ() >> 4);
+        $chunkX = $player->getPosition()->getFloorX() >> 4;
+        $chunkZ = $player->getPosition()->getFloorZ() >> 4;
 
-		if (!$player->isConnected() || !$player->isAlive()) {
-			$this->finishTransfer($name);
-			return;
-		}
+        /*
+         * ChunkSelector uses a circular view-distance boundary.
+         *
+         * Keep the square readiness area inside that boundary so
+         * the plugin never waits for chunks that the negotiated
+         * view distance will not request.
+         */
+        $viewDistance = max(0, $player->getViewDistance());
 
-		// Step 1: send dimension change to Nether (triggers portal/loading screen on client)
-		$session->sendDataPacket(ChangeDimensionPacket::create(
-			DimensionIds::NETHER,
-			$player->getPosition(),
-			false,
-			null
-		));
+        $viewSafeRadius = (int) floor($viewDistance / M_SQRT2);
 
-		$blockLocation = BlockPosition::fromVector3($player->getLocation());
-		$session->sendDataPacket(PlayerActionPacket::create($player->getId(), PlayerAction::DIMENSION_CHANGE_ACK, $blockLocation, $blockLocation, 0));
-		$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
+        $chunkRadius = min(
+            $this->configuredChunkRadius,
+            $viewSafeRadius
+        );
 
-		// Step 2: Order chunk population for the configured radius around the player
-		// so chunks load while in "Nether". This prevents slow chunk loading on return.
-		$onAllChunksLoaded = function () use ($player, $session, $name, $state, $plugin): void {
-			if (!$player->isConnected() || !$player->isAlive()) {
-				$this->finishTransfer($name);
-				return;
-			}
+        $state = new TransferState(
+            $player,
+            $world,
+            $chunkX,
+            $chunkZ,
+            $chunkRadius
+        );
 
-			$delay = (int) ($this->config["return-delay-ticks"] ?? 10);
-			$plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function () use ($player, $session, $name): void {
-				if (!$player->isConnected() || !$player->isAlive()) {
-					$this->finishTransfer($name);
-					return;
-				}
+        $this->transferring[$name] = $state;
 
-				// Sync all necessary data to avoid visual glitches
-				$session->syncGameMode($player->getGamemode());
-				$session->syncAbilities($player);
-				$session->syncAdventureSettings();
-				$session->syncViewAreaRadius($player->getViewDistance());
-				$session->syncPlayerSpawnPoint($player->getSpawn());
-				$session->syncAvailableCommands();
-				$session->onEnterWorld();
-				$world = $player->getWorld();
-				$session->syncPlayerList($world->getPlayers());
+        // Timeout remains active until the entire transfer is finished,
+        // including the return-delay period.
+        $state->timeoutTask = $this->getScheduler()->scheduleDelayedTask(
+            new ClosureTask(function() use ($name, $state) : void{
+                if($this->isCurrentTransfer($name, $state)){
+                    $this->getLogger()->warning(
+                        "Chunk-send wait timed out for {$name}; restoring the destination dimension."
+                    );
 
-				// Return to Overworld dimension
-				$session->sendDataPacket(ChangeDimensionPacket::create(
-					DimensionIds::OVERWORLD,
-					$player->getPosition(),
-					false,
-					null
-				));
+                    $this->finishTransfer($name, $state, true);
+                }
+            }),
+            $this->transferTimeoutSeconds * 20
+        );
 
-				$session->sendDataPacket(PlayerActionPacket::create(
-					$player->getId(),
-					PlayerAction::DIMENSION_CHANGE_ACK,
-					BlockPosition::fromVector3($player->getLocation()),
-					BlockPosition::fromVector3($player->getLocation()),
-					0
-				));
-				$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
-				$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
+        // Show the fake Nether loading screen.
+        $this->showFakeNetherScreen($player);
 
-				$this->finishTransfer($name);
-			}), $delay);
-		};
+        // Poll the actual player chunk-send status.
+        $state->chunkPollTask = $this->getScheduler()->scheduleRepeatingTask(
+            new ClosureTask(function() use ($name, $state) : void{
+                $this->pollRequiredChunks($name, $state);
+            }),
+            1
+        );
+    }
 
-		$onChunkError = function () use ($name): void {
-			$this->finishTransfer($name);
-			$player = Server::getInstance()->getPlayerExact($name);
-			if ($player !== null && $player->isConnected() && $player->isAlive()) {
-				$player->kick("Failed to load chunks. (Prevent stuck at nether glitch)", null, "You didn't finish joining.");
-			}
-		};
+    /**
+     * Wait until every chunk in the configured destination area
+     * has reached the SENT state for this player.
+     */
+    private function pollRequiredChunks(string $name, TransferState $state) : void{
+        if(!$this->isCurrentTransfer($name, $state)){
+            return;
+        }
 
-		$remaining = $state->totalChunks;
-		$completionChecker = function () use ($state, $onAllChunksLoaded, $onChunkError, &$remaining): void {
-			if ($state->completed) {
-				return;
-			}
-			$remaining--;
-			if ($remaining <= 0) {
-				$state->completed = true;
-				$onAllChunksLoaded();
-			}
-		};
+        $player = $state->player;
 
-		for ($dx = -$chunkRadius; $dx <= $chunkRadius; $dx++) {
-			for ($dz = -$chunkRadius; $dz <= $chunkRadius; $dz++) {
-				$cx = $chunkX + $dx;
-				$cz = $chunkZ + $dz;
-				$world = $player->getWorld();
-				$world->orderChunkPopulation($cx, $cz, null)->onCompletion(
-					$completionChecker,
-					$onChunkError
-				);
-			}
-		}
+        if(!$player->isConnected() || !$player->isAlive()){
+            $this->finishTransfer($name, $state);
+            return;
+        }
 
-		// Set timeout task to prevent stuck transfers
-		$timeoutSeconds = (int) ($this->config["transfer-timeout-seconds"] ?? 30);
-		$state->timeoutTask = $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function () use ($name): void {
-			if (isset($this->transferring[$name]) && !$this->transferring[$name]->completed) {
-				$this->forceFinishTransfer($name);
-			}
-		}), $timeoutSeconds * 20);
-	}
+        if($player->getWorld() !== $state->world){
+            // The player moved to another destination while the fake screen was active.
+            $this->finishTransfer($name, $state, true);
+            return;
+        }
 
-	/**
-	 * Mark a transfer as finished and decrement active counter.
-	 */
-	private function finishTransfer(string $name) : void {
-		if (isset($this->transferring[$name])) {
-			$state = $this->transferring[$name];
-			if (isset($state->timeoutTask)) {
-				$state->timeoutTask->cancel();
-			}
-			unset($this->transferring[$name]);
-			$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
-		}
-	}
+        for($dx = -$state->chunkRadius; $dx <= $state->chunkRadius; ++$dx){
+            for($dz = -$state->chunkRadius; $dz <= $state->chunkRadius; ++$dz){
+                if(!$player->hasReceivedChunk(
+                    $state->centerChunkX + $dx,
+                    $state->centerChunkZ + $dz
+                )){
+                    return;
+                }
+            }
+        }
 
-	/**
-	 * Force-finish a stuck transfer (timeout).
-	 */
-	private function forceFinishTransfer(string $name) : void {
-		if (!isset($this->transferring[$name])) {
-			return;
-		}
-		$state = $this->transferring[$name];
-		if (isset($state->timeoutTask)) {
-			$state->timeoutTask->cancel();
-		}
-		unset($this->transferring[$name]);
-		$this->activeTransferCount = max(0, $this->activeTransferCount - 1);
+        if($state->returnScheduled){
+            return;
+        }
 
-		$player = Server::getInstance()->getPlayerExact($name);
-		if ($player !== null && $player->isConnected() && $player->isAlive()) {
-			$session = $player->getNetworkSession();
-			$session->sendDataPacket(ChangeDimensionPacket::create(
-				DimensionIds::OVERWORLD,
-				$player->getPosition(),
-				false,
-				null
-			));
-			$session->sendDataPacket(PlayerActionPacket::create(
-				$player->getId(),
-				PlayerAction::DIMENSION_CHANGE_ACK,
-				BlockPosition::fromVector3($player->getLocation()),
-				BlockPosition::fromVector3($player->getLocation()),
-				0
-			));
-			$session->sendDataPacket(PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN));
-			$session->sendDataPacket(StopSoundPacket::create("portal.travel", true, true));
-		}
-	}
+        $state->returnScheduled = true;
 
-	private function isPlayerConnected(Player $player) : bool {
-		return $player->isConnected();
-	}
+        $state->chunkPollTask?->cancel();
+        $state->chunkPollTask = null;
 
-	private function isPlayerAlive(Player $player) : bool {
-		return $player->isAlive();
-	}
+        // All required chunks have been sent. Keep the screen for the
+        // configured extra delay, then restore the destination dimension.
+        $state->returnTask = $this->getScheduler()->scheduleDelayedTask(
+            new ClosureTask(function() use ($name, $state) : void{
+                if(!$this->isCurrentTransfer($name, $state)){
+                    return;
+                }
+
+                $player = $state->player;
+
+                if(!$player->isConnected() || !$player->isAlive()){
+                    $this->finishTransfer($name, $state);
+                    return;
+                }
+
+                $this->finishTransfer($name, $state, true);
+            }),
+            $this->returnDelayTicks
+        );
+    }
+
+    private function showFakeNetherScreen(Player $player) : void{
+        $session = $player->getNetworkSession();
+
+        $position = $player->getPosition();
+        $blockPosition = BlockPosition::fromVector3($player->getLocation());
+
+        $session->sendDataPacket(
+            ChangeDimensionPacket::create(
+                DimensionIds::NETHER,
+                $position,
+                false,
+                null
+            )
+        );
+
+        $session->sendDataPacket(
+            PlayerActionPacket::create(
+                $player->getId(),
+                PlayerAction::DIMENSION_CHANGE_ACK,
+                $blockPosition,
+                $blockPosition,
+                0
+            )
+        );
+
+        $session->sendDataPacket(
+            StopSoundPacket::create("portal.travel", true, true)
+        );
+    }
+
+    /**
+     * Restores the protocol dimension corresponding to the player's current world.
+     *
+     * The timeout path uses this same method, so it does not blindly
+     * force OVERWORLD.
+     */
+    private function restoreTargetDimension(Player $player) : void{
+        $session = $player->getNetworkSession();
+        $world = $player->getWorld();
+
+        $dimensionId = $this->applicableWorlds[$world->getFolderName()]
+            ?? DimensionIds::OVERWORLD;
+
+        $position = $player->getPosition();
+        $blockPosition = BlockPosition::fromVector3($player->getLocation());
+
+        // Synchronize the player's world state before returning.
+        $session->syncGameMode($player->getGamemode());
+        $session->syncAbilities($player);
+        $session->syncAdventureSettings();
+        $session->syncViewAreaRadius($player->getViewDistance());
+        $session->syncPlayerSpawnPoint($player->getSpawn());
+        $session->syncAvailableCommands();
+        $session->onEnterWorld();
+        $session->syncPlayerList($world->getPlayers());
+
+        $session->sendDataPacket(
+            ChangeDimensionPacket::create(
+                $dimensionId,
+                $position,
+                false,
+                null
+            )
+        );
+
+        $session->sendDataPacket(
+            PlayerActionPacket::create(
+                $player->getId(),
+                PlayerAction::DIMENSION_CHANGE_ACK,
+                $blockPosition,
+                $blockPosition,
+                0
+            )
+        );
+
+        $session->sendDataPacket(
+            PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN)
+        );
+
+        $session->sendDataPacket(
+            StopSoundPacket::create("portal.travel", true, true)
+        );
+    }
+
+    private function isCurrentTransfer(string $name, TransferState $state) : bool{
+        return isset($this->transferring[$name])
+            && $this->transferring[$name] === $state;
+    }
+
+    /**
+     * Releases the transfer state and optionally restores the dimension.
+     */
+    private function finishTransfer(
+        string $name,
+        ?TransferState $expected = null,
+        bool $restoreDimension = false
+    ) : void{
+        $state = $this->transferring[$name] ?? null;
+
+        if($state === null || ($expected !== null && $state !== $expected)){
+            return;
+        }
+
+        unset($this->transferring[$name]);
+
+        $state->timeoutTask?->cancel();
+        $state->chunkPollTask?->cancel();
+        $state->returnTask?->cancel();
+
+        $player = $state->player;
+
+        if($restoreDimension && $player->isConnected() && $player->isAlive()){
+            $this->restoreTargetDimension($player);
+        }
+    }
+
+    private function processTransferQueue() : void{
+        while(
+            count($this->transferring) < $this->maxConcurrentTransfers
+            && $this->transferQueue !== []
+        ){
+            $name = array_key_first($this->transferQueue);
+
+            if($name === null){
+                return;
+            }
+
+            $player = $this->transferQueue[$name];
+
+            unset($this->transferQueue[$name]);
+
+            if(!$player->isConnected() || !$player->isAlive()){
+                continue;
+            }
+
+            if(isset($this->transferring[$name])){
+                continue;
+            }
+
+            // Read the current world and position when dequeued,
+            // not the position from the original teleport event.
+            $this->startTransfer($player);
+        }
+    }
+
+    private function registerKnownCompressor(Compressor $compressor) : void{
+        $id = spl_object_id($compressor);
+
+        if(isset($this->knownCompressors[$id])){
+            return;
+        }
+
+        $this->knownCompressors[$id] = $compressor;
+
+        foreach($this->getServer()->getWorldManager()->getWorlds() as $world){
+            $this->registerHackToWorldIfApplicable($world);
+        }
+    }
+
+    private function registerHackToWorldIfApplicable(World $world) : bool{
+        $folderName = $world->getFolderName();
+
+        if(!isset($this->applicableWorlds[$folderName])){
+            return false;
+        }
+
+        $this->registerHackToWorld(
+            $world,
+            $this->applicableWorlds[$folderName]
+        );
+
+        return true;
+    }
+
+    /**
+     * @param DimensionIds::* $dimensionId
+     */
+    private function registerHackToWorld(World $world, int $dimensionId) : void{
+        if($this->dimensionIdProperty === null){
+            return;
+        }
+
+        foreach($this->knownCompressors as $compressor){
+            $chunkCache = ChunkCache::getInstance($world, $compressor);
+
+            $this->dimensionIdProperty->setValue(
+                $chunkCache,
+                $dimensionId
+            );
+        }
+    }
+
+    /**
+     * Maps a world folder to the dimension ID used when its chunks are sent.
+     *
+     * @param DimensionIds::* $dimensionId
+     */
+    public function applyToWorld(string $worldFolderName, int $dimensionId) : void{
+        $this->applicableWorlds[$worldFolderName] = $dimensionId;
+
+        $world = $this->getServer()->getWorldManager()->getWorldByName($worldFolderName);
+
+        if($world !== null){
+            $this->registerHackToWorldIfApplicable($world);
+        }
+    }
+
+    /**
+     * Restores the given world's chunk-cache dimension ID to OVERWORLD.
+     */
+    public function unapplyFromWorld(string $worldFolderName) : void{
+        unset($this->applicableWorlds[$worldFolderName]);
+
+        $world = $this->getServer()->getWorldManager()->getWorldByName($worldFolderName);
+
+        if($world !== null){
+            $this->registerHackToWorld($world, DimensionIds::OVERWORLD);
+        }
+    }
 }
