@@ -1,0 +1,4 @@
+max-concurrent-transfers: 100
+chunk-radius: 6
+return-delay-ticks: 20
+transfer-timeout-seconds: 30
