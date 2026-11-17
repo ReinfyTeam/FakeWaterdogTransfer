@@ -16,6 +16,11 @@
         "build-source": "php -dphar.readonly=0 vendor/bin/pharynx -i=. -c -o=./output/"
     },
     "require": {},
+    "autoload": {
+        "psr-4": {
+            "ReinfyTeam\\FakeWaterdogTransfer\\": "src/"
+        }
+    },
     "require-dev": {
         "axolotl-pm/pocketmine-mp": "5.51.1",
         "sof3/pharynx": "^0.3.0",
