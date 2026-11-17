@@ -16,6 +16,7 @@ use pocketmine\world\World;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
 use ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferScreen;
+use ReflectionClass;
 use ReflectionProperty;
 use function array_key_first;
 use function count;
@@ -43,11 +44,18 @@ final class TransferManager{
     /** @var TaskHandler<ClosureTask>|null */
     private ?TaskHandler $tickTask = null;
 
+    private ?ReflectionProperty $chunksPerTickProperty = null;
+
     public function __construct(
         private readonly TransferConfig $config,
         private readonly ChunkForcer $chunkForcer,
         private readonly TaskScheduler $scheduler,
-    ){}
+    ){
+        $playerClass = new ReflectionClass(Player::class);
+        if($playerClass->hasProperty("chunksPerTick")){
+            $this->chunksPerTickProperty = $playerClass->getProperty("chunksPerTick");
+        }
+    }
 
     public function onEnable() : void{
         $this->tickTask = $this->scheduler->scheduleRepeatingTask(
@@ -225,7 +233,7 @@ final class TransferManager{
      * Temporarily increases chunksPerTick for the duration of the transfer.
      */
     private function applyTemporaryChunkSendBoost(Player $player) : ?int{
-        $prop = $this->getReflectionProperty(Player::class, "chunksPerTick");
+        $prop = $this->chunksPerTickProperty;
         if($prop === null){
             return null;
         }
@@ -347,7 +355,7 @@ final class TransferManager{
         $player = $state->player;
 
         // Restore chunksPerTick to the value before the temporary boost.
-        $originalChunksPerTickProp = $this->getReflectionProperty(Player::class, "chunksPerTick");
+        $originalChunksPerTickProp = $this->chunksPerTickProperty;
         if($state->originalChunksPerTick !== null && $originalChunksPerTickProp !== null){
             try{
                 $originalChunksPerTickProp->setValue($player, $state->originalChunksPerTick);
@@ -433,26 +441,5 @@ final class TransferManager{
      */
     public function unapplyFromWorld(string $worldFolderName) : void{
         unset($this->applicableWorlds[$worldFolderName]);
-    }
-
-    /** @var array<string, ReflectionProperty|null> */
-    private array $reflectionPropertyCache = [];
-
-    /** @param class-string $class */
-    private function getReflectionProperty(string $class, string $property) : ?ReflectionProperty{
-        $key = $class . "::" . $property;
-        if(array_key_exists($key, $this->reflectionPropertyCache)){
-            return $this->reflectionPropertyCache[$key];
-        }
-
-        try{
-            $reflectionProperty = new ReflectionProperty($class, $property);
-        }catch(\ReflectionException $e){
-            $this->reflectionPropertyCache[$key] = null;
-            return null;
-        }
-
-        $this->reflectionPropertyCache[$key] = $reflectionProperty;
-        return $reflectionProperty;
     }
 }
