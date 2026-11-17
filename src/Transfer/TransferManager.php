@@ -6,14 +6,17 @@ namespace ReinfyTeam\FakeWaterdogTransfer\Transfer;
 
 use pocketmine\event\entity\EntityTeleportEvent;
 use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\player\Player;
 use pocketmine\player\UsedChunkStatus;
 use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
+use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
 use ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferScreen;
+use ReflectionProperty;
 use function array_key_first;
 use function count;
 use function floor;
@@ -37,17 +40,20 @@ final class TransferManager{
     /** @var array<string, DimensionIds::*> World folder => Bedrock dimension ID */
     private array $applicableWorlds = [];
 
+    /** @var TaskHandler<ClosureTask>|null */
     private ?TaskHandler $tickTask = null;
 
     public function __construct(
         private readonly TransferConfig $config,
         private readonly ChunkForcer $chunkForcer,
-        private readonly \Closure $schedulerGetter,
+        private readonly TaskScheduler $scheduler,
     ){}
 
     public function onEnable() : void{
-        $this->tickTask = ($this->schedulerGetter())->scheduleRepeatingTask(
-            new ClosureTask([$this, "tick"]),
+        $this->tickTask = $this->scheduler->scheduleRepeatingTask(
+            new ClosureTask(function() : void{
+                $this->tick();
+            }),
             1
         );
     }
@@ -78,7 +84,7 @@ final class TransferManager{
             return;
         }
 
-        ($this->schedulerGetter())->scheduleDelayedTask(
+        $this->scheduler->scheduleDelayedTask(
             new ClosureTask(function() use ($player, $toWorld) : void{
                 if(!$player->isConnected() || !$player->isAlive()){
                     return;
@@ -176,7 +182,9 @@ final class TransferManager{
         $originalChunksPerTick = $this->applyTemporaryChunkSendBoost($player);
 
         // Force fast chunk loading before creating state so chunks start moving immediately.
-        [$originalViewDistance, $viewDistanceBoosted] = $this->chunkForcer->force($player);
+        $forcedChunkSettings = $this->chunkForcer->force($player);
+        $originalViewDistance = $forcedChunkSettings["originalViewDistance"];
+        $viewDistanceBoosted = $forcedChunkSettings["viewDistanceBoosted"];
 
         $state = new TransferState(
             $player,
@@ -190,7 +198,7 @@ final class TransferManager{
         $this->transferring[$name] = $state;
 
         // Timeout stays active through both chunk delivery and return delay.
-        $state->timeoutTask = ($this->schedulerGetter())->scheduleDelayedTask(
+        $state->timeoutTask = $this->scheduler->scheduleDelayedTask(
             new ClosureTask(function() use ($name, $state) : void{
                 if(!$this->isCurrentTransfer($name, $state)){
                     return;
@@ -223,7 +231,10 @@ final class TransferManager{
         }
 
         try{
-            $original = (int) $prop->getValue($player);
+            $original = $prop->getValue($player);
+            if(!is_int($original)){
+                return null;
+            }
             $boosted = max($original, $this->config->getTransferChunksPerTick());
             if($boosted !== $original){
                 $prop->setValue($player, $boosted);
@@ -298,7 +309,7 @@ final class TransferManager{
 
         $state->returnScheduled = true;
 
-        $state->returnTask = ($this->schedulerGetter())->scheduleDelayedTask(
+        $state->returnTask = $this->scheduler->scheduleDelayedTask(
             new ClosureTask(function() use ($name, $state) : void{
                 if(!$this->isCurrentTransfer($name, $state)){
                     return;
@@ -377,7 +388,8 @@ final class TransferManager{
             return;
         }
 
-        $player->kick($this->config->getKickMessage(), true);
+        $kickMessage = $this->config->getKickMessage();
+        $player->kick($kickMessage, null, $kickMessage);
     }
 
     private function processTransferQueue() : void{
@@ -386,10 +398,6 @@ final class TransferManager{
             && $this->transferQueue !== []
         ){
             $name = array_key_first($this->transferQueue);
-
-            if($name === null){
-                return;
-            }
 
             $player = $this->transferQueue[$name];
             unset($this->transferQueue[$name]);
@@ -427,23 +435,24 @@ final class TransferManager{
         unset($this->applicableWorlds[$worldFolderName]);
     }
 
-    // --- Reflection helper -------------------------------------------------
+    /** @var array<string, ReflectionProperty|null> */
+    private array $reflectionPropertyCache = [];
 
-    private function getReflectionProperty(string $class, string $property): ?\ReflectionProperty{
-        static $cache = [];
-
+    /** @param class-string $class */
+    private function getReflectionProperty(string $class, string $property) : ?ReflectionProperty{
         $key = $class . "::" . $property;
-        if(isset($cache[$key])){
-            return $cache[$key];
+        if(array_key_exists($key, $this->reflectionPropertyCache)){
+            return $this->reflectionPropertyCache[$key];
         }
 
         try{
-            $ref = new \ReflectionProperty($class, $property);
-            $cache[$key] = $ref;
-            return $ref;
+            $reflectionProperty = new ReflectionProperty($class, $property);
         }catch(\ReflectionException $e){
-            $cache[$key] = null;
+            $this->reflectionPropertyCache[$key] = null;
             return null;
         }
+
+        $this->reflectionPropertyCache[$key] = $reflectionProperty;
+        return $reflectionProperty;
     }
 }

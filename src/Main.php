@@ -20,7 +20,7 @@ use pocketmine\world\World;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
 use ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferManager;
-use ReflectionException;
+use ReflectionClass;
 use ReflectionProperty;
 use spl_object_id;
 
@@ -53,7 +53,7 @@ final class Main extends PluginBase{
         $this->transferManager = new TransferManager(
             $this->config,
             $this->chunkForcer,
-            fn() => $this->getScheduler()
+            $this->getScheduler()
         );
         $this->transferManager->onEnable();
 
@@ -118,16 +118,15 @@ final class Main extends PluginBase{
     }
 
     private function initializeReflectionProperties() : void{
-        try{
-            $this->dimensionIdProperty = new ReflectionProperty(
-                ChunkCache::class,
-                "dimensionId"
-            );
-        }catch(ReflectionException $e){
+        $chunkCacheClass = new ReflectionClass(ChunkCache::class);
+        if(!$chunkCacheClass->hasProperty("dimensionId")){
             $this->getLogger()->critical(
-                "Cannot access ChunkCache::dimensionId; fake dimension chunk-cache mapping is unavailable: " . $e->getMessage()
+                "Cannot access ChunkCache::dimensionId; fake dimension chunk-cache mapping is unavailable."
             );
+            return;
         }
+
+        $this->dimensionIdProperty = $chunkCacheClass->getProperty("dimensionId");
     }
 
     private function registerKnownCompressor(Compressor $compressor) : void{
@@ -197,6 +196,6 @@ final class Main extends PluginBase{
         }
     }
 
-    /** @var array<string, int> World folder => dimension ID */
+    /** @var array<string, DimensionIds::*> World folder => dimension ID */
     private array $applicableWorlds = [];
 }

@@ -12,60 +12,72 @@ final class TransferConfig{
     ){}
 
     public function getMaxConcurrentTransfers() : int{
-        return max(
-            1,
-            min(100, (int) $this->plugin->getConfig()->get("max-concurrent-transfers", 15))
-        );
+        return $this->getBoundedInt("max-concurrent-transfers", 15, 1, 100);
     }
 
     public function getConfiguredChunkRadius() : int{
-        return max(1, min(5, (int) $this->plugin->getConfig()->get("chunk-radius", 2)));
+        return $this->getBoundedInt("chunk-radius", 2, 1, 5);
     }
 
     public function getReturnDelayTicks() : int{
-        return max(1, min(100, (int) $this->plugin->getConfig()->get("return-delay-ticks", 1)));
+        return $this->getBoundedInt("return-delay-ticks", 1, 1, 100);
     }
 
     public function getTransferTimeoutSeconds() : int{
-        return max(5, min(300, (int) $this->plugin->getConfig()->get("transfer-timeout-seconds", 30)));
+        return $this->getBoundedInt("transfer-timeout-seconds", 30, 5, 300);
     }
 
     public function getTransferChunksPerTick() : int{
-        return max(4, min(128, (int) $this->plugin->getConfig()->get("transfer-chunks-per-tick", 8)));
+        return $this->getBoundedInt("transfer-chunks-per-tick", 8, 4, 128);
     }
 
     public function getForcedChunkRadius() : int{
-        return max(1, min(32, (int) $this->plugin->getConfig()->get("forced-chunk-radius", 8)));
+        return $this->getBoundedInt("forced-chunk-radius", 8, 1, 32);
     }
 
     public function getForcedChunksPerTick() : int{
-        return max(4, min(128, (int) $this->plugin->getConfig()->get("forced-chunks-per-tick", 32)));
+        return $this->getBoundedInt("forced-chunks-per-tick", 32, 4, 128);
     }
 
     public function getForceWorldChunkLoading() : bool{
-        return (bool) $this->plugin->getConfig()->get("force-world-chunk-loading", true);
+        return $this->getBoolean("force-world-chunk-loading", true);
     }
 
     public function getTemporaryViewDistanceBoost() : bool{
-        return (bool) $this->plugin->getConfig()->get("temporary-view-distance-boost", true);
+        return $this->getBoolean("temporary-view-distance-boost", true);
     }
 
     public function getWaitForFullViewDistance() : bool{
-        return (bool) $this->plugin->getConfig()->get("wait-for-full-view-distance", true);
+        return $this->getBoolean("wait-for-full-view-distance", true);
     }
 
     public function getKickStuckPlayers() : bool{
-        return (bool) $this->plugin->getConfig()->get("kick-stuck-players", true);
+        return $this->getBoolean("kick-stuck-players", true);
     }
 
     public function getKickMessage() : string{
-        return (string) $this->plugin->getConfig()->get(
-            "kick-message",
-            "§cYou got stuck during world transfer. Please reconnect."
-        );
+        $default = "§cYou got stuck during world transfer. Please reconnect.";
+        $value = $this->plugin->getConfig()->get("kick-message", $default);
+
+        return is_string($value) ? $value : $default;
     }
 
     public function getKickStuckAfterSeconds() : int{
-        return max(5, min(300, (int) $this->plugin->getConfig()->get("kick-stuck-after-seconds", 15)));
+        return $this->getBoundedInt("kick-stuck-after-seconds", 15, 5, 300);
+    }
+
+    private function getBoundedInt(string $key, int $default, int $minimum, int $maximum) : int{
+        $value = $this->plugin->getConfig()->get($key, $default);
+        if(!is_numeric($value)){
+            return $default;
+        }
+
+        return max($minimum, min($maximum, (int) $value));
+    }
+
+    private function getBoolean(string $key, bool $default) : bool{
+        $value = $this->plugin->getConfig()->get($key, $default);
+
+        return is_bool($value) ? $value : $default;
     }
 }

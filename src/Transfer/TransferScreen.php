@@ -97,6 +97,8 @@ final class TransferScreen{
     /**
      * Returns the Bedrock dimension ID mapped to the given world folder,
      * defaulting to OVERWORLD.
+     *
+     * @param array<string, DimensionIds::*> $applicableWorlds
      */
     public static function getDimensionIdForWorld(array $applicableWorlds, string $folderName) : int{
         return $applicableWorlds[$folderName] ?? DimensionIds::OVERWORLD;

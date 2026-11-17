@@ -7,7 +7,7 @@ namespace ReinfyTeam\FakeWaterdogTransfer\Chunk;
 use pocketmine\player\ChunkSelector;
 use pocketmine\player\Player;
 use pocketmine\world\World;
-use ReflectionException;
+use ReflectionClass;
 use ReflectionProperty;
 use Throwable;
 
@@ -35,28 +35,27 @@ final class ChunkForcer{
     }
 
     private function initializeReflectionProperties() : void{
-        try{
-            $this->chunksPerTickProperty = new ReflectionProperty(Player::class, "chunksPerTick");
-        }catch(ReflectionException $e){}
+        $playerClass = new ReflectionClass(Player::class);
+        $this->chunksPerTickProperty = $this->getPlayerProperty($playerClass, "chunksPerTick");
+        $this->nextChunkOrderRunProperty = $this->getPlayerProperty($playerClass, "nextChunkOrderRun");
+        $this->loadQueueProperty = $this->getPlayerProperty($playerClass, "loadQueue");
+        $this->viewDistanceProperty = $this->getPlayerProperty($playerClass, "viewDistance");
+    }
 
-        try{
-            $this->nextChunkOrderRunProperty = new ReflectionProperty(Player::class, "nextChunkOrderRun");
-        }catch(ReflectionException $e){}
+    /** @param ReflectionClass<Player> $playerClass */
+    private function getPlayerProperty(ReflectionClass $playerClass, string $property) : ?ReflectionProperty{
+        if(!$playerClass->hasProperty($property)){
+            return null;
+        }
 
-        try{
-            $this->loadQueueProperty = new ReflectionProperty(Player::class, "loadQueue");
-        }catch(ReflectionException $e){}
-
-        try{
-            $this->viewDistanceProperty = new ReflectionProperty(Player::class, "viewDistance");
-        }catch(ReflectionException $e){}
+        return $playerClass->getProperty($property);
     }
 
     /**
      * Forces fast chunk loading around the player. Returns the original view
      * distance so it can be restored later, and whether it was boosted.
      *
-     * @return array{int originalViewDistance, bool viewDistanceBoosted}
+     * @return array{originalViewDistance: int, viewDistanceBoosted: bool}
      */
     public function force(Player $player) : array{
         $originalViewDistance = (int) $player->getViewDistance();
@@ -67,8 +66,8 @@ final class ChunkForcer{
 
         if($this->viewDistanceProperty !== null && $this->viewDistanceBoostEnabled){
             try{
-                $currentVD = (int) $this->viewDistanceProperty->getValue($player);
-                if($currentVD === -1 || $currentVD < $this->forcedChunkRadius){
+                $currentViewDistance = $this->viewDistanceProperty->getValue($player);
+                if(is_int($currentViewDistance) && ($currentViewDistance === -1 || $currentViewDistance < $this->forcedChunkRadius)){
                     $this->viewDistanceProperty->setValue($player, $this->forcedChunkRadius);
                     $viewDistanceBoosted = true;
                 }
@@ -81,7 +80,10 @@ final class ChunkForcer{
 
         $this->prepopulateLoadQueue($player);
 
-        return [$originalViewDistance, $viewDistanceBoosted];
+        return [
+            "originalViewDistance" => $originalViewDistance,
+            "viewDistanceBoosted" => $viewDistanceBoosted
+        ];
     }
 
     /**
@@ -103,7 +105,10 @@ final class ChunkForcer{
         }
 
         try{
-            $original = (int) $this->chunksPerTickProperty->getValue($player);
+            $original = $this->chunksPerTickProperty->getValue($player);
+            if(!is_int($original)){
+                return;
+            }
             $newValue = max($original, $this->forcedChunksPerTick);
             if($newValue !== $original){
                 $this->chunksPerTickProperty->setValue($player, $newValue);
@@ -152,7 +157,10 @@ final class ChunkForcer{
         }
 
         try{
-            $loadQueue = (array) $this->loadQueueProperty->getValue($player);
+            $loadQueue = $this->loadQueueProperty->getValue($player);
+            if(!is_array($loadQueue)){
+                return;
+            }
             $selector = $this->getChunkSelector();
             $centerX = (int) ($player->getPosition()->getFloorX() >> 4);
             $centerZ = (int) ($player->getPosition()->getFloorZ() >> 4);

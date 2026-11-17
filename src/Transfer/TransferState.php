@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ReinfyTeam\FakeWaterdogTransfer\Transfer;
 
 use pocketmine\player\Player;
+use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\world\World;
 
@@ -15,7 +16,9 @@ use pocketmine\world\World;
  * has completed, so chunk readiness is checked against the destination.
  */
 final class TransferState{
+    /** @var TaskHandler<ClosureTask>|null */
     public ?TaskHandler $timeoutTask = null;
+    /** @var TaskHandler<ClosureTask>|null */
     public ?TaskHandler $returnTask = null;
     public bool $returnScheduled = false;
     public int $originalViewDistance = -1;
