@@ -17,6 +17,7 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
+ *
  */
 
 declare(strict_types=1);
@@ -25,9 +26,9 @@ namespace ReinfyTeam\FakeWaterdogTransfer\Chunk;
 
 use pocketmine\player\ChunkSelector;
 use pocketmine\player\Player;
-use pocketmine\world\World;
 use ReflectionProperty;
 use Throwable;
+use function is_int;
 use function max;
 
 /**

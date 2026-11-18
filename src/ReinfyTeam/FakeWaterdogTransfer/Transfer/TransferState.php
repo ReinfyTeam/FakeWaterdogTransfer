@@ -17,6 +17,7 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
+ *
  */
 
 declare(strict_types=1);
@@ -55,7 +56,6 @@ final class TransferState {
 	// --- Chunk polling ---
 	public int $lastSentCount = 0;
 	public int $ticksWithoutProgress = 0;
-	public int $chunkNudgeTick = 0;
 
 	// --- Tick-based timing (replaces per-player ClosureTasks) ---
 
@@ -64,12 +64,6 @@ final class TransferState {
 
 	/** Whether the fake Nether screen has been shown. */
 	public bool $netherScreenShown = false;
-
-	/** Return phase: 0=none, 1=waiting before Overworld screen, 2=waiting before real change. */
-	public int $returnPhase = 0;
-
-	/** Ticks elapsed in the current return phase. */
-	public int $returnPhaseTicks = 0;
 
 	/** Ticks elapsed since transfer started (for timeout tracking). */
 	public int $timeoutTicks = 0;

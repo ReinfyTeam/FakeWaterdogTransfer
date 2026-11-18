@@ -17,6 +17,7 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
+ *
  */
 
 declare(strict_types=1);
@@ -32,15 +33,14 @@ use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
+use ReflectionProperty;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
-use ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferScreen;
-use ReflectionClass;
-use ReflectionProperty;
 use function array_key_first;
 use function array_keys;
 use function count;
 use function floor;
+use function is_int;
 use function max;
 use function min;
 use const M_SQRT2;
@@ -68,9 +68,7 @@ final class TransferManager {
 	/** @var TaskHandler<ClosureTask>|null */
 	private ?TaskHandler $tickTask = null;
 
-	/**
-	 * @phpstan-var \Closure(): TaskScheduler
-	 */
+	/** @phpstan-var \Closure(): TaskScheduler */
 	private readonly \Closure $schedulerGetter;
 
 	public function __construct(
@@ -138,8 +136,8 @@ final class TransferManager {
 	 * Main tick: processes the queue and polls chunk readiness for all active transfers.
 	 *
 	 * Runs once per server tick. All per-player timing (Nether screen delay,
-	 * timeout, phased return with Overworld screen) is handled here via
-	 * TransferState tick counters instead of per-player ClosureTasks.
+	 * timeout) is handled here via TransferState tick counters instead of
+	 * per-player ClosureTasks.
 	 */
 	public function tick() : void {
 		$this->processTransferQueue();
@@ -161,9 +159,7 @@ final class TransferManager {
 				continue;
 			}
 
-			$this->nudgePlayerForChunks($state);
 			$this->pollRequiredChunks($name, $state);
-			$this->handleReturnPhase($name, $state);
 		}
 	}
 
@@ -339,8 +335,8 @@ final class TransferManager {
 	/**
 	 * Polls a single transfer: checks if all required chunks are SENT.
 	 *
-	 * When all chunks are sent, starts the phased return (Overworld screen
-	 * then real dimension change) handled in tick().
+	 * When all chunks are sent, finishes the transfer with a real dimension
+	 * change so the client can spawn.
 	 */
 	private function pollRequiredChunks(string $name, TransferState $state) : void {
 		if (!$this->isCurrentTransfer($name, $state)) {
@@ -371,14 +367,8 @@ final class TransferManager {
 			return;
 		}
 
-		if ($state->returnPhase !== 0) {
-			return;
-		}
-
-		// Start phased return (handled in tick()):
-		// 5 ticks -> show Overworld screen -> 5 ticks -> real dimension change.
-		$state->returnPhase = 1;
-		$state->returnPhaseTicks = 0;
+		// All chunks ready — finish with real dimension change.
+		$this->finishTransfer($name, $state, true);
 	}
 
 	/**
@@ -443,29 +433,6 @@ final class TransferManager {
 			}
 		}
 		return true;
-	}
-
-	/**
-	 * Phased return: 5 ticks wait -> show Overworld screen -> 5 ticks wait -> real change.
-	 *
-	 * Phase 1: wait 5 ticks, then show fake Overworld screen.
-	 * Phase 2: wait 5 ticks, then call finishTransfer() for real dimension change.
-	 */
-	private function handleReturnPhase(string $name, TransferState $state) : void {
-		if ($state->returnPhase === 1) {
-			$state->returnPhaseTicks++;
-			if ($state->returnPhaseTicks >= 5) {
-				TransferScreen::showFakeOverworldScreen($state->player);
-				$state->returnPhase = 2;
-				$state->returnPhaseTicks = 0;
-			}
-		} elseif ($state->returnPhase === 2) {
-			$state->returnPhaseTicks++;
-			if ($state->returnPhaseTicks >= 5) {
-				$this->finishTransfer($name, $state, true);
-				$state->returnPhase = 0;
-			}
-		}
 	}
 
 	private function finishTransfer(
@@ -549,35 +516,6 @@ final class TransferManager {
 		}
 	}
 
-	/**
-	 * Keeps the chunk sender flowing when the player is standing still by
-	 * resetting the chunk-order cooldown. Does not move the player, so it
-	 * does not cause shaking or desync.
-	 *
-	 * Only activates after 1 second of no chunk progress, and fires at most
-	 * once every 2 seconds, so it never interferes with normal movement.
-	 */
-	private function nudgePlayerForChunks(TransferState $state) : void {
-		$player = $state->player;
-
-		if (!$player->isConnected() || !$player->isAlive()) {
-			return;
-		}
-
-		// Only when chunk delivery has stalled for at least 1 second.
-		if ($state->ticksWithoutProgress < 20) {
-			return;
-		}
-
-		$state->chunkNudgeTick++;
-		if ($state->chunkNudgeTick < 40) {
-			return;
-		}
-		$state->chunkNudgeTick = 0;
-
-		$this->chunkForcer->resetChunkOrder($player);
-	}
-
 	private function isCurrentTransfer(string $name, TransferState $state) : bool {
 		return isset($this->transferring[$name])
 			&& $this->transferring[$name] === $state;
@@ -601,8 +539,6 @@ final class TransferManager {
 
 	/**
 	 * Returns the server's scheduler.
-	 *
-	 * @return TaskScheduler
 	 */
 	private function getScheduler() : TaskScheduler {
 		/** @var TaskScheduler $scheduler */

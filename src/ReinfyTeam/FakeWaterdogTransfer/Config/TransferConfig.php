@@ -17,6 +17,7 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
+ *
  */
 
 declare(strict_types=1);
@@ -24,6 +25,9 @@ declare(strict_types=1);
 namespace ReinfyTeam\FakeWaterdogTransfer\Config;
 
 use pocketmine\plugin\PluginBase;
+use function is_bool;
+use function is_int;
+use function is_string;
 use function max;
 use function min;
 
