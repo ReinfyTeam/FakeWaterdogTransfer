@@ -34,6 +34,7 @@ use pocketmine\scheduler\TaskHandler;
 use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
 use ReflectionClass;
+use ReflectionException;
 use ReflectionProperty;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
@@ -68,10 +69,12 @@ final class TransferManager {
 
 	/** @var TaskHandler<ClosureTask>|null */
 	private ?TaskHandler $tickTask = null;
-	private ?ReflectionProperty $chunksPerTickProperty = null;
 
 	/** @phpstan-var \Closure(): TaskScheduler */
 	private readonly \Closure $schedulerGetter;
+
+	/** @var array<string, ReflectionProperty|null> */
+	private static array $reflectionPropertyCache = [];
 
 	public function __construct(
 		private readonly TransferConfig $config,
@@ -79,11 +82,6 @@ final class TransferManager {
 		\Closure $schedulerGetter,
 	) {
 		$this->schedulerGetter = $schedulerGetter;
-
-		$playerClass = new ReflectionClass(Player::class);
-		if ($playerClass->hasProperty("chunksPerTick")) {
-			$this->chunksPerTickProperty = $playerClass->getProperty("chunksPerTick");
-		}
 	}
 
 	public function onEnable() : void {
@@ -316,7 +314,7 @@ final class TransferManager {
 	 * Temporarily increases chunksPerTick for the duration of the transfer.
 	 */
 	private function applyTemporaryChunkSendBoost(Player $player) : ?int {
-		$prop = $this->chunksPerTickProperty;
+		$prop = $this->getReflectionProperty(Player::class, "chunksPerTick");
 		if ($prop === null) {
 			return null;
 		}
@@ -458,7 +456,7 @@ final class TransferManager {
 		$player = $state->player;
 
 		// Restore chunksPerTick to the value before the temporary boost.
-		$originalChunksPerTickProp = $this->chunksPerTickProperty;
+		$originalChunksPerTickProp = $this->getReflectionProperty(Player::class, "chunksPerTick");
 		if ($state->originalChunksPerTick !== null && $originalChunksPerTickProp !== null) {
 			try {
 				$originalChunksPerTickProp->setValue($player, $state->originalChunksPerTick);
@@ -551,6 +549,34 @@ final class TransferManager {
 		/** @var TaskScheduler $scheduler */
 		$scheduler = ($this->schedulerGetter)();
 		return $scheduler;
+	}
+
+	/**
+	 * Gets a ReflectionProperty for the given class and property name.
+	 * Results are cached for performance.
+	 *
+	 * @param class-string $class The class name
+	 */
+	private function getReflectionProperty(string $class, string $property) : ?ReflectionProperty {
+		$key = $class . "::" . $property;
+		if (isset(self::$reflectionPropertyCache[$key])) {
+			return self::$reflectionPropertyCache[$key];
+		}
+
+		try {
+			$classReflection = new ReflectionClass($class);
+			if (!$classReflection->hasProperty($property)) {
+				self::$reflectionPropertyCache[$key] = null;
+				return null;
+			}
+
+			$reflectionProperty = $classReflection->getProperty($property);
+			self::$reflectionPropertyCache[$key] = $reflectionProperty;
+			return $reflectionProperty;
+		} catch(ReflectionException $e) {
+			self::$reflectionPropertyCache[$key] = null;
+			return null;
+		}
 	}
 
 }
