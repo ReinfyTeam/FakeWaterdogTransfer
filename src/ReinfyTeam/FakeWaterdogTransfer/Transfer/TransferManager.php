@@ -34,7 +34,6 @@ use pocketmine\scheduler\TaskHandler;
 use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
 use ReflectionClass;
-use ReflectionException;
 use ReflectionProperty;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
@@ -563,20 +562,20 @@ final class TransferManager {
 			return self::$reflectionPropertyCache[$key];
 		}
 
-		try {
-			$classReflection = new ReflectionClass($class);
-			if (!$classReflection->hasProperty($property)) {
-				self::$reflectionPropertyCache[$key] = null;
-				return null;
-			}
-
-			$reflectionProperty = $classReflection->getProperty($property);
-			self::$reflectionPropertyCache[$key] = $reflectionProperty;
-			return $reflectionProperty;
-		} catch(ReflectionException $e) {
+		if ($class !== Player::class || $property !== "chunksPerTick") {
 			self::$reflectionPropertyCache[$key] = null;
 			return null;
 		}
+
+		$playerClass = new ReflectionClass(Player::class);
+		if (!$playerClass->hasProperty("chunksPerTick")) {
+			self::$reflectionPropertyCache[$key] = null;
+			return null;
+		}
+
+		$reflectionProperty = $playerClass->getProperty("chunksPerTick");
+		self::$reflectionPropertyCache[$key] = $reflectionProperty;
+		return $reflectionProperty;
 	}
 
 }
