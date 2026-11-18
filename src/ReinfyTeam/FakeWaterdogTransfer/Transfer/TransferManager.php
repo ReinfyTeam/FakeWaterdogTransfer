@@ -33,6 +33,7 @@ use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
+use ReflectionClass;
 use ReflectionProperty;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
@@ -70,6 +71,9 @@ final class TransferManager {
 
 	/** @phpstan-var \Closure(): TaskScheduler */
 	private readonly \Closure $schedulerGetter;
+
+	/** @var array<string, ReflectionProperty|null> */
+	private static array $reflectionPropertyCache = [];
 
 	public function __construct(
 		private readonly TransferConfig $config,
@@ -644,31 +648,32 @@ final class TransferManager {
 		return $scheduler;
 	}
 
-	// --- Reflection helper -------------------------------------------------
-
 	/**
 	 * Gets a ReflectionProperty for the given class and property name.
 	 * Results are cached for performance.
 	 *
 	 * @param class-string $class The class name
-	 * @return \ReflectionProperty|null The reflection property, or null if not found
 	 */
-	private function getReflectionProperty(string $class, string $property) : ?\ReflectionProperty {
-		/** @var array<string, \ReflectionProperty|null> */
-		static $cache = [];
-
+	private function getReflectionProperty(string $class, string $property) : ?ReflectionProperty {
 		$key = $class . "::" . $property;
-		if (isset($cache[$key])) {
-			return $cache[$key];
+		if (isset(self::$reflectionPropertyCache[$key])) {
+			return self::$reflectionPropertyCache[$key];
 		}
 
-		try {
-			$ref = new \ReflectionProperty($class, $property);
-			$cache[$key] = $ref;
-			return $ref;
-		} catch(\ReflectionException $e) {
-			$cache[$key] = null;
+		if ($class !== Player::class || $property !== "chunksPerTick") {
+			self::$reflectionPropertyCache[$key] = null;
 			return null;
 		}
+
+		$playerClass = new ReflectionClass(Player::class);
+		if (!$playerClass->hasProperty("chunksPerTick")) {
+			self::$reflectionPropertyCache[$key] = null;
+			return null;
+		}
+
+		$reflectionProperty = $playerClass->getProperty("chunksPerTick");
+		self::$reflectionPropertyCache[$key] = $reflectionProperty;
+		return $reflectionProperty;
 	}
+
 }
