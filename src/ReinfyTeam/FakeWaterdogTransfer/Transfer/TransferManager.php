@@ -33,6 +33,7 @@ use pocketmine\scheduler\ClosureTask;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
+use ReflectionClass;
 use ReflectionProperty;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
@@ -67,6 +68,7 @@ final class TransferManager {
 
 	/** @var TaskHandler<ClosureTask>|null */
 	private ?TaskHandler $tickTask = null;
+	private ?ReflectionProperty $chunksPerTickProperty = null;
 
 	/** @phpstan-var \Closure(): TaskScheduler */
 	private readonly \Closure $schedulerGetter;
@@ -77,6 +79,11 @@ final class TransferManager {
 		\Closure $schedulerGetter,
 	) {
 		$this->schedulerGetter = $schedulerGetter;
+
+		$playerClass = new ReflectionClass(Player::class);
+		if ($playerClass->hasProperty("chunksPerTick")) {
+			$this->chunksPerTickProperty = $playerClass->getProperty("chunksPerTick");
+		}
 	}
 
 	public function onEnable() : void {
@@ -309,7 +316,7 @@ final class TransferManager {
 	 * Temporarily increases chunksPerTick for the duration of the transfer.
 	 */
 	private function applyTemporaryChunkSendBoost(Player $player) : ?int {
-		$prop = $this->getReflectionProperty(Player::class, "chunksPerTick");
+		$prop = $this->chunksPerTickProperty;
 		if ($prop === null) {
 			return null;
 		}
@@ -451,7 +458,7 @@ final class TransferManager {
 		$player = $state->player;
 
 		// Restore chunksPerTick to the value before the temporary boost.
-		$originalChunksPerTickProp = $this->getReflectionProperty(Player::class, "chunksPerTick");
+		$originalChunksPerTickProp = $this->chunksPerTickProperty;
 		if ($state->originalChunksPerTick !== null && $originalChunksPerTickProp !== null) {
 			try {
 				$originalChunksPerTickProp->setValue($player, $state->originalChunksPerTick);
@@ -546,31 +553,4 @@ final class TransferManager {
 		return $scheduler;
 	}
 
-	// --- Reflection helper -------------------------------------------------
-
-	/**
-	 * Gets a ReflectionProperty for the given class and property name.
-	 * Results are cached for performance.
-	 *
-	 * @param class-string $class The class name
-	 * @return \ReflectionProperty|null The reflection property, or null if not found
-	 */
-	private function getReflectionProperty(string $class, string $property) : ?\ReflectionProperty {
-		/** @var array<string, \ReflectionProperty|null> */
-		static $cache = [];
-
-		$key = $class . "::" . $property;
-		if (isset($cache[$key])) {
-			return $cache[$key];
-		}
-
-		try {
-			$ref = new \ReflectionProperty($class, $property);
-			$cache[$key] = $ref;
-			return $ref;
-		} catch(\ReflectionException $e) {
-			$cache[$key] = null;
-			return null;
-		}
-	}
 }
