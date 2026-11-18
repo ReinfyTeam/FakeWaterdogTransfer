@@ -17,7 +17,7 @@
     },
     "autoload": {
         "psr-4": {
-            "ReinfyTeam\\FakeWaterdogTransfer\\": "src/"
+            "ReinfyTeam\\FakeWaterdogTransfer\\": "src/ReinfyTeam/FakeWaterdogTransfer/"
         }
     },
     "require-dev": {

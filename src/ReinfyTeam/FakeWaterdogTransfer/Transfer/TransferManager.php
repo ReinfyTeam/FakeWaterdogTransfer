@@ -17,7 +17,6 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
- *
  */
 
 declare(strict_types=1);
@@ -26,6 +25,7 @@ namespace ReinfyTeam\FakeWaterdogTransfer\Transfer;
 
 use pocketmine\event\entity\EntityTeleportEvent;
 use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\player\Player;
 use pocketmine\player\UsedChunkStatus;
 use pocketmine\scheduler\ClosureTask;
@@ -34,6 +34,9 @@ use pocketmine\scheduler\TaskScheduler;
 use pocketmine\world\World;
 use ReinfyTeam\FakeWaterdogTransfer\Chunk\ChunkForcer;
 use ReinfyTeam\FakeWaterdogTransfer\Config\TransferConfig;
+use ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferScreen;
+use ReflectionClass;
+use ReflectionProperty;
 use function array_key_first;
 use function array_keys;
 use function count;
@@ -62,8 +65,12 @@ final class TransferManager {
 	/** @var array<string, int> World folder => Bedrock dimension ID */
 	private array $applicableWorlds = [];
 
+	/** @var TaskHandler<ClosureTask>|null */
 	private ?TaskHandler $tickTask = null;
 
+	/**
+	 * @phpstan-var \Closure(): TaskScheduler
+	 */
 	private readonly \Closure $schedulerGetter;
 
 	public function __construct(
@@ -593,10 +600,14 @@ final class TransferManager {
 	}
 
 	/**
-	 * @return \pocketmine\scheduler\TaskScheduler
+	 * Returns the server's scheduler.
+	 *
+	 * @return TaskScheduler
 	 */
-	private function getScheduler() : \pocketmine\scheduler\TaskScheduler {
-		return ($this->schedulerGetter)();
+	private function getScheduler() : TaskScheduler {
+		/** @var TaskScheduler $scheduler */
+		$scheduler = ($this->schedulerGetter)();
+		return $scheduler;
 	}
 
 	// --- Reflection helper -------------------------------------------------

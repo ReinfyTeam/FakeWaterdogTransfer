@@ -6,5 +6,4 @@ author: ReinfyTeam
 authors: [xqwtxon, xwertxy]
 api: 5.0.0
 main: ReinfyTeam\FakeWaterdogTransfer\Main
-src-namespace-prefix: ReinfyTeam\FakeWaterdogTransfer
 ...

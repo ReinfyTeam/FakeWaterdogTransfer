@@ -17,9 +17,7 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
-
-
-*/
+ */
 
 declare(strict_types=1);
 

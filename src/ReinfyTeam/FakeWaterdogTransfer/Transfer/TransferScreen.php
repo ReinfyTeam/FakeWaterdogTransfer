@@ -17,7 +17,6 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
- *
  */
 
 declare(strict_types=1);
@@ -25,13 +24,14 @@ declare(strict_types=1);
 namespace ReinfyTeam\FakeWaterdogTransfer\Transfer;
 
 use pocketmine\network\mcpe\protocol\ChangeDimensionPacket;
-use pocketmine\network\mcpe\protocol\PlayerActionPacket;
 use pocketmine\network\mcpe\protocol\PlayStatusPacket;
+use pocketmine\network\mcpe\protocol\PlayerActionPacket;
 use pocketmine\network\mcpe\protocol\StopSoundPacket;
 use pocketmine\network\mcpe\protocol\types\BlockPosition;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\player\Player;
+use pocketmine\network\mcpe\NetworkSession;
 
 final class TransferScreen {
 	/**

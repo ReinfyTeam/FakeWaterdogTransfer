@@ -17,7 +17,6 @@
  * @author ReinfyTeam
  * @link https://github.com/ReinfyTeam/
  *
- *
  */
 
 declare(strict_types=1);
@@ -25,6 +24,7 @@ declare(strict_types=1);
 namespace ReinfyTeam\FakeWaterdogTransfer\Transfer;
 
 use pocketmine\player\Player;
+use pocketmine\scheduler\Task;
 use pocketmine\scheduler\TaskHandler;
 use pocketmine\world\World;
 
@@ -39,7 +39,10 @@ use pocketmine\world\World;
  */
 final class TransferState {
 	// --- Transfer lifecycle tasks ---
+	/** @var TaskHandler<Task>|null */
 	public ?TaskHandler $timeoutTask = null;
+
+	/** @var TaskHandler<Task>|null */
 	public ?TaskHandler $returnTask = null;
 
 	// --- Transfer flags ---
