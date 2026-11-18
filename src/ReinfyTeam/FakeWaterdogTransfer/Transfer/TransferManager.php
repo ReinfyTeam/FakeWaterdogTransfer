@@ -112,18 +112,7 @@ final class TransferManager {
 			return;
 		}
 
-		$this->getScheduler()->scheduleDelayedTask(
-			new ClosureTask(function() use ($player, $toWorld) : void {
-				if (!$player->isConnected() || !$player->isAlive()) {
-					return;
-				}
-				if ($player->getWorld() !== $toWorld) {
-					return;
-				}
-				$this->queueOrStartTransfer($player);
-			}),
-			1
-		);
+		$this->queueOrStartTransfer($player);
 	}
 
 	public function handlePlayerQuit(PlayerQuitEvent $event) : void {
@@ -159,16 +148,45 @@ final class TransferManager {
 				continue;
 			}
 
+			// Force dimension change if chunks have stalled too long, so the
+			// player is never stuck forever at the loading screen.
+			if (!$state->dimensionChangeSent && $state->chunksForceThreshold > 0) {
+				if ($state->chunksForceTicks >= $state->chunksForceThreshold) {
+					$state->chunksForceTicks = 0;
+					$state->chunksForceThreshold = 0;
+					$state->dimensionChangeForced = true;
+
+					$player = $state->player;
+					$dimensionId = TransferScreen::getDimensionIdForWorld(
+						$this->applicableWorlds,
+						$player->getWorld()->getFolderName()
+					);
+					TransferScreen::sendRealDimensionChange($player, $dimensionId);
+					$state->dimensionChangeSent = true;
+
+					$player->getServer()->getLogger()->warning(
+						"Forcing dimension change for {$name} due to stalled chunks."
+					);
+					continue;
+				}
+			}
+
+			// If real dimension change was sent last tick, send spawn now.
+			if ($state->dimensionChangeSent) {
+				$this->spawnPlayerAfterDimensionChange($name, $state);
+				continue;
+			}
+
+			$this->nudgePlayerForChunks($state);
 			$this->pollRequiredChunks($name, $state);
 		}
 	}
 
 	/**
-	 * Shows the fake Nether transition screen after 5 ticks, giving chunks
-	 * time to start loading before the client sees the screen.
+	 * Shows the fake Nether transition screen immediately after teleport.
 	 */
 	private function handleNetherScreenTiming(string $name, TransferState $state) : void {
-		if ($state->netherScreenShown || $state->ticksSinceStart < 5) {
+		if ($state->netherScreenShown) {
 			return;
 		}
 
@@ -241,6 +259,10 @@ final class TransferManager {
 		$world = $player->getWorld();
 		$position = $player->getPosition();
 
+		// Teleport to destination explicitly so PocketMine queues the new
+		// world's chunks immediately, before the fake screen is shown.
+		$player->teleport($position);
+
 		$chunkX = $position->getFloorX() >> 4;
 		$chunkZ = $position->getFloorZ() >> 4;
 
@@ -274,7 +296,15 @@ final class TransferManager {
 		// scheduling a per-player ClosureTask — scales to 100+ players.
 		$state->timeoutThreshold = $this->config->getTransferTimeoutSeconds() * 20;
 
-		// The fake Nether screen is shown in tick() after 5 ticks.
+		// Force dimension change after 10 seconds of stalled chunks, so the
+		// player is never stuck forever if chunks stop sending.
+		$state->chunksForceThreshold = 10 * 20;
+
+		// Lock player during transfer so they don't fall into void while
+		// chunks load. Unlocked when DIMENSION_CHANGE_ACK is received.
+		$player->setNoClientPredictions(true);
+
+		// The fake Nether screen is shown in tick() immediately.
 	}
 
 	/**
@@ -335,8 +365,10 @@ final class TransferManager {
 	/**
 	 * Polls a single transfer: checks if all required chunks are SENT.
 	 *
-	 * When all chunks are sent, finishes the transfer with a real dimension
-	 * change so the client can spawn.
+	 * When all chunks are sent, sends the real ChangeDimensionPacket first,
+	 * then waits one tick before spawning the client. This prevents the
+	 * client from getting stuck when ChangeDimensionPacket and PLAYER_SPAWN
+	 * are sent in the same tick.
 	 */
 	private function pollRequiredChunks(string $name, TransferState $state) : void {
 		if (!$this->isCurrentTransfer($name, $state)) {
@@ -367,8 +399,14 @@ final class TransferManager {
 			return;
 		}
 
-		// All chunks ready — finish with real dimension change.
-		$this->finishTransfer($name, $state, true);
+		// All chunks ready — send real dimension change first.
+		// Spawn will follow in the next tick via dimensionChangeSent.
+		$dimensionId = TransferScreen::getDimensionIdForWorld(
+			$this->applicableWorlds,
+			$player->getWorld()->getFolderName()
+		);
+		TransferScreen::sendRealDimensionChange($player, $dimensionId);
+		$state->dimensionChangeSent = true;
 	}
 
 	/**
@@ -388,8 +426,10 @@ final class TransferManager {
 		if ($sentCount > $state->lastSentCount) {
 			$state->lastSentCount = $sentCount;
 			$state->ticksWithoutProgress = 0;
+			$state->chunksForceTicks = 0;
 		} elseif ($sentCount < count($state->requiredChunkHashes)) {
 			$state->ticksWithoutProgress++;
+			$state->chunksForceTicks++;
 		}
 	}
 
@@ -435,6 +475,29 @@ final class TransferManager {
 		return true;
 	}
 
+	/**
+	 * Spawns the player after the real ChangeDimensionPacket was sent in the
+	 * previous tick. Gives the client one tick to process the dimension
+	 * change before spawning. Movement is unlocked via DIMENSION_CHANGE_ACK
+	 * interception in Main::onPacketReceive().
+	 */
+	private function spawnPlayerAfterDimensionChange(string $name, TransferState $state) : void {
+		$player = $state->player;
+
+		if (!$player->isConnected() || !$player->isAlive()) {
+			$this->finishTransfer($name, $state, false);
+			return;
+		}
+
+		$dimensionId = TransferScreen::getDimensionIdForWorld(
+			$this->applicableWorlds,
+			$player->getWorld()->getFolderName()
+		);
+		TransferScreen::spawnPlayer($player, $dimensionId);
+
+		$this->finishTransfer($name, $state, false);
+	}
+
 	private function finishTransfer(
 		string $name,
 		?TransferState $expected = null,
@@ -449,6 +512,9 @@ final class TransferManager {
 		unset($this->transferring[$name]);
 
 		$player = $state->player;
+
+		// Unlock player movement immediately.
+		$player->setNoClientPredictions(false);
 
 		// Restore chunksPerTick to the value before the temporary boost.
 		$originalChunksPerTickProp = $this->getReflectionProperty(Player::class, "chunksPerTick");
@@ -474,7 +540,7 @@ final class TransferManager {
 				$this->applicableWorlds,
 				$player->getWorld()->getFolderName()
 			);
-			TransferScreen::restoreTargetDimension($player, $dimensionId);
+			TransferScreen::restoreTargetDimension($player, $dimensionId, $state->dimensionChangeSent);
 		}
 	}
 
@@ -484,6 +550,9 @@ final class TransferManager {
 	 */
 	private function kickStuckPlayer(Player $player) : void {
 		$name = $player->getName();
+
+		// Unlock movement first.
+		$player->setNoClientPredictions(false);
 
 		// Clean up transfer state first (don't restore dimension, just release)
 		$this->finishTransfer($name, null, false);
@@ -514,6 +583,35 @@ final class TransferManager {
 
 			$this->startTransfer($player);
 		}
+	}
+
+	/**
+	 * Keeps the chunk sender flowing when the player is standing still by
+	 * resetting the chunk-order cooldown. Does not move the player, so it
+	 * does not cause shaking or desync.
+	 *
+	 * Only activates after 1 second of no chunk progress, and fires at most
+	 * once every 2 seconds, so it never interferes with normal movement.
+	 */
+	private function nudgePlayerForChunks(TransferState $state) : void {
+		$player = $state->player;
+
+		if (!$player->isConnected() || !$player->isAlive()) {
+			return;
+		}
+
+		// Only when chunk delivery has stalled for at least 1 second.
+		if ($state->ticksWithoutProgress < 20) {
+			return;
+		}
+
+		$state->chunkNudgeTick++;
+		if ($state->chunkNudgeTick < 40) {
+			return;
+		}
+		$state->chunkNudgeTick = 0;
+
+		$this->chunkForcer->resetChunkOrder($player);
 	}
 
 	private function isCurrentTransfer(string $name, TransferState $state) : bool {

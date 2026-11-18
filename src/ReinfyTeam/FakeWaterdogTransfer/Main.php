@@ -28,12 +28,16 @@ use pocketmine\event\entity\EntityTeleportEvent;
 use pocketmine\event\EventPriority;
 use pocketmine\event\player\PlayerLoginEvent;
 use pocketmine\event\player\PlayerQuitEvent;
+use pocketmine\event\server\DataPacketReceiveEvent;
 use pocketmine\event\server\LowMemoryEvent;
 use pocketmine\event\world\WorldLoadEvent;
 use pocketmine\network\mcpe\cache\ChunkCache;
 use pocketmine\network\mcpe\compression\Compressor;
 use pocketmine\network\mcpe\compression\ZlibCompressor;
+use pocketmine\network\mcpe\protocol\PlayerActionPacket;
+use pocketmine\network\mcpe\protocol\PlayStatusPacket;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
+use pocketmine\network\mcpe\protocol\types\PlayerAction;
 use pocketmine\plugin\PluginBase;
 use pocketmine\utils\SingletonTrait;
 use pocketmine\world\World;
@@ -129,11 +133,58 @@ final class Main extends PluginBase {
 			$this
 		);
 
+		$pluginManager->registerEvent(
+			DataPacketReceiveEvent::class,
+			function(DataPacketReceiveEvent $event) : void {
+				$this->onPacketReceive($event);
+			},
+			EventPriority::MONITOR,
+			$this
+		);
+
 		$this->registerKnownCompressor(ZlibCompressor::getInstance());
 	}
 
 	protected function onDisable() : void {
 		$this->transferManager->onDisable();
+	}
+
+	/**
+	 * Intercepts DIMENSION_CHANGE_ACK (action 14) from the client.
+	 *
+	 * PocketMine-MP rejects action type 14, which leaves the player's
+	 * movement locked (no client predictions flag) after a simulated
+	 * dimension switch. By cancelling the event, disabling no client
+	 * predictions, and immediately resending PLAYER_SPAWN, the player can
+	 * move right after the loading screen disappears without the ~1 second
+	 * freeze.
+	 */
+	public function onPacketReceive(DataPacketReceiveEvent $event) : void {
+		$packet = $event->getPacket();
+
+		if (!$packet instanceof PlayerActionPacket) {
+			return;
+		}
+
+		if ($packet->action !== PlayerAction::DIMENSION_CHANGE_ACK) {
+			return;
+		}
+
+		// Cancel so PocketMine-MP does not try to process/reject this action.
+		$event->cancel();
+
+		$player = $event->getOrigin()->getPlayer();
+		if ($player === null) {
+			return;
+		}
+
+		// Unlock movement immediately.
+		$player->setNoClientPredictions(false);
+
+		// Resend spawn so the client recognizes movement capability right away.
+		$player->getNetworkSession()->sendDataPacket(
+			PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN)
+		);
 	}
 
 	private function initializeReflectionProperties() : void {

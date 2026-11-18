@@ -56,20 +56,33 @@ final class TransferState {
 	// --- Chunk polling ---
 	public int $lastSentCount = 0;
 	public int $ticksWithoutProgress = 0;
+	public int $chunkNudgeTick = 0;
 
 	// --- Tick-based timing (replaces per-player ClosureTasks) ---
 
 	/** Ticks elapsed since transfer started. */
 	public int $ticksSinceStart = 0;
 
-	/** Whether the fake Nether screen has been shown. */
+	/** Whether the fake Nether screen has been shown (shown immediately after teleport). */
 	public bool $netherScreenShown = false;
+
+	/** Whether the real ChangeDimensionPacket has been sent (waiting for spawn next tick). */
+	public bool $dimensionChangeSent = false;
+
+	/** Whether the dimension change was forced due to chunk stall (skipping chunk wait). */
+	public bool $dimensionChangeForced = false;
 
 	/** Ticks elapsed since transfer started (for timeout tracking). */
 	public int $timeoutTicks = 0;
 
 	/** Timeout threshold in ticks (0 = disabled). */
 	public int $timeoutThreshold = 0;
+
+	/** Ticks since chunk progress stalled (for forced dimension change fallback). */
+	public int $chunksForceTicks = 0;
+
+	/** Threshold in ticks after which to force dimension change despite stalled chunks. */
+	public int $chunksForceThreshold = 0;
 
 	public function __construct(
 		public readonly Player $player,

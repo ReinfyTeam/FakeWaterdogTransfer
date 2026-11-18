@@ -75,13 +75,30 @@ final class TransferScreen {
 	}
 
 	/**
-	 * Restores the real destination dimension and lets the client spawn.
-	 *
-	 * Called after destination chunks are ready. Sends only the real
-	 * ChangeDimensionPacket + spawn — no fake screens, no delayed tasks
-	 * (scales to 100+ players).
+	 * Sends only the real ChangeDimensionPacket to the destination dimension.
+	 * No spawn packets — the client needs one tick to process the dimension
+	 * change before spawning, otherwise it can get stuck.
 	 */
-	public static function restoreTargetDimension(Player $player, int $dimensionId) : void {
+	public static function sendRealDimensionChange(Player $player, int $dimensionId) : void {
+		$session = $player->getNetworkSession();
+		$position = $player->getPosition();
+
+		$session->sendDataPacket(
+			ChangeDimensionPacket::create(
+				$dimensionId,
+				$position,
+				false,
+				null
+			)
+		);
+	}
+
+	/**
+	 * Spawns the player in the destination dimension after the
+	 * ChangeDimensionPacket has been processed by the client.
+	 * Sends all sync packets + PLAYER_SPAWN.
+	 */
+	public static function spawnPlayer(Player $player, int $dimensionId) : void {
 		$session = $player->getNetworkSession();
 		$world = $player->getWorld();
 		$position = $player->getPosition();
@@ -97,21 +114,28 @@ final class TransferScreen {
 		$session->syncPlayerList($world->getPlayers());
 
 		$session->sendDataPacket(
-			ChangeDimensionPacket::create(
-				$dimensionId,
-				$position,
-				false,
-				null
-			)
-		);
-
-		$session->sendDataPacket(
 			PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN)
 		);
 
 		$session->sendDataPacket(
 			StopSoundPacket::create("portal.travel", true, true)
 		);
+	}
+
+	/**
+	 * Restores the real destination dimension and lets the client spawn.
+	 *
+	 * If $dimensionChangeSent is true, the ChangeDimensionPacket was already
+	 * sent in a previous tick, so only spawn packets are sent.
+	 *
+	 * @param bool $dimensionChangeSent Whether ChangeDimensionPacket was already sent
+	 */
+	public static function restoreTargetDimension(Player $player, int $dimensionId, bool $dimensionChangeSent = false) : void {
+		if (!$dimensionChangeSent) {
+			self::sendRealDimensionChange($player, $dimensionId);
+		}
+
+		self::spawnPlayer($player, $dimensionId);
 	}
 
 	/**
