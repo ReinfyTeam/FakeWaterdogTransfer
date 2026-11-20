@@ -34,7 +34,9 @@ use pocketmine\event\world\WorldLoadEvent;
 use pocketmine\network\mcpe\cache\ChunkCache;
 use pocketmine\network\mcpe\compression\Compressor;
 use pocketmine\network\mcpe\compression\ZlibCompressor;
+use pocketmine\network\mcpe\protocol\MovePlayerPacket;
 use pocketmine\network\mcpe\protocol\PlayerActionPacket;
+use pocketmine\network\mcpe\protocol\PlayerAuthInputPacket;
 use pocketmine\network\mcpe\protocol\PlayStatusPacket;
 use pocketmine\network\mcpe\protocol\types\DimensionIds;
 use pocketmine\network\mcpe\protocol\types\PlayerAction;
@@ -58,6 +60,9 @@ final class Main extends PluginBase {
 	private ChunkForcer $chunkForcer;
 
 	private ?ReflectionProperty $dimensionIdProperty = null;
+
+	/** @var array<string, bool> Player name => is in dimension transition */
+	private array $playersInTransition = [];
 
 	protected function onLoad() : void {
 		self::setInstance($this);
@@ -133,6 +138,9 @@ final class Main extends PluginBase {
 			$this
 		);
 
+		// Intercept incoming packets during dimension transitions.
+		// Blocks MovePlayerPacket and PlayerAuthInputPacket while a player is
+		// transferring, preventing client/server movement desync.
 		$pluginManager->registerEvent(
 			DataPacketReceiveEvent::class,
 			function(DataPacketReceiveEvent $event) : void {
@@ -154,13 +162,32 @@ final class Main extends PluginBase {
 	 *
 	 * PocketMine-MP rejects action type 14, which leaves the player's
 	 * movement locked (no client predictions flag) after a simulated
-	 * dimension switch. By cancelling the event, disabling no client
-	 * predictions, and immediately resending PLAYER_SPAWN, the player can
-	 * move right after the loading screen disappears without the ~1 second
-	 * freeze.
+	 * dimension switch.
+	 *
+	 * We distinguish between:
+	 *   - Fake Nether ACK: acknowledged during the loading screen. Does NOT
+	 *     unlock movement — chunks may still be loading.
+	 *   - Real Overworld ACK: acknowledged after the real destination
+	 *     dimension change. Unlocks movement and completes the transfer.
 	 */
 	public function onPacketReceive(DataPacketReceiveEvent $event) : void {
 		$packet = $event->getPacket();
+		$player = $event->getOrigin()->getPlayer();
+
+		if ($player === null) {
+			return;
+		}
+
+		$name = $player->getName();
+
+		// Block movement packets during transitions to prevent
+		// client/server movement desync (rubberbanding).
+		if ($packet instanceof MovePlayerPacket || $packet instanceof PlayerAuthInputPacket) {
+			if (isset($this->playersInTransition[$name])) {
+				$event->cancel();
+			}
+			return;
+		}
 
 		if (!$packet instanceof PlayerActionPacket) {
 			return;
@@ -173,18 +200,60 @@ final class Main extends PluginBase {
 		// Cancel so PocketMine-MP does not try to process/reject this action.
 		$event->cancel();
 
-		$player = $event->getOrigin()->getPlayer();
-		if ($player === null) {
+		if (!isset($this->playersInTransition[$name])) {
 			return;
 		}
 
-		// Unlock movement immediately.
-		$player->setNoClientPredictions(false);
+		// Determine whether this ACK is for the fake Nether screen or the
+		// real destination dimension change.
+		$state = $this->getTransferState($name);
+		if ($state === null) {
+			return;
+		}
 
-		// Resend spawn so the client recognizes movement capability right away.
-		$player->getNetworkSession()->sendDataPacket(
-			PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN)
-		);
+		if (!$state->dimensionChangeSent) {
+			// This is the fake Nether acknowledgement. Do NOT unlock movement
+			// — chunks may still be loading.
+			$this->transferManager->markFakeNetherAckReceived($name);
+			return;
+		}
+
+		if (!$state->realDimensionAckReceived) {
+			// This is the REAL dimension acknowledgement. Unlock movement
+			// immediately and resend spawn.
+			$this->transferManager->markRealDimensionAckReceived($name);
+
+			// Unlock movement immediately.
+			$player->setNoClientPredictions(false);
+
+			// Resend spawn so the client recognizes movement capability right away.
+			$player->getNetworkSession()->sendDataPacket(
+				PlayStatusPacket::create(PlayStatusPacket::PLAYER_SPAWN)
+			);
+		}
+	}
+
+	/**
+	 * Gets the TransferState for a player, or null if not in a transfer.
+	 */
+	private function getTransferState(string $name) : ?\ReinfyTeam\FakeWaterdogTransfer\Transfer\TransferState {
+		return $this->transferManager->getTransferState($name);
+	}
+
+	/**
+	 * Marks a player as being in a dimension transition.
+	 * Movement packets will be blocked until markTransitionComplete() is called.
+	 */
+	public function markTransitionStart(string $name) : void {
+		$this->playersInTransition[$name] = true;
+	}
+
+	/**
+	 * Marks a player's dimension transition as complete.
+	 * Movement packets will no longer be blocked.
+	 */
+	public function markTransitionComplete(string $name) : void {
+		unset($this->playersInTransition[$name]);
 	}
 
 	private function initializeReflectionProperties() : void {

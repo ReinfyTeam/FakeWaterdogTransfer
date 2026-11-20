@@ -55,6 +55,10 @@ use const M_SQRT2;
  * All per-player timing is handled inside tick() via TransferState tick
  * counters instead of per-player ClosureTasks, so the plugin scales to
  * 100+ concurrent players without scheduling overhead.
+ *
+ * State machine per player:
+ *   teleport_complete → show_nether_screen → wait_for_chunks →
+ *   send_real_dimension_change → wait_for_real_ack → spawn_player → done
  */
 final class TransferManager {
 	/** @var array<string, TransferState> Player name => active transfer state */
@@ -100,7 +104,8 @@ final class TransferManager {
 
 	/**
 	 * Handles EntityTeleportEvent (MONITOR priority). Deferred one tick so
-	 * other listeners can cancel/modify the destination first.
+	 * PocketMine-MP finishes the actual teleport (world/position change)
+	 * before FakeWaterdogTransfer initializes its state.
 	 */
 	public function handleTeleport(EntityTeleportEvent $event) : void {
 		$player = $event->getEntity();
@@ -116,7 +121,20 @@ final class TransferManager {
 			return;
 		}
 
-		$this->queueOrStartTransfer($player);
+		$this->getScheduler()->scheduleDelayedTask(
+			new ClosureTask(function() use ($player, $toWorld) : void {
+				if (
+					!$player->isConnected()
+					|| !$player->isAlive()
+					|| $player->getWorld() !== $toWorld
+				) {
+					return;
+				}
+
+				$this->queueOrStartTransfer($player);
+			}),
+			1
+		);
 	}
 
 	public function handlePlayerQuit(PlayerQuitEvent $event) : void {
@@ -154,7 +172,11 @@ final class TransferManager {
 
 			// Force dimension change if chunks have stalled too long, so the
 			// player is never stuck forever at the loading screen.
-			if (!$state->dimensionChangeSent && $state->chunksForceThreshold > 0) {
+			if (
+				!$state->dimensionChangeSent
+				&& !$state->realDimensionAckReceived
+				&& $state->chunksForceThreshold > 0
+			) {
 				if ($state->chunksForceTicks >= $state->chunksForceThreshold) {
 					$state->chunksForceTicks = 0;
 					$state->chunksForceThreshold = 0;
@@ -175,14 +197,21 @@ final class TransferManager {
 				}
 			}
 
-			// If real dimension change was sent last tick, send spawn now.
-			if ($state->dimensionChangeSent) {
-				$this->spawnPlayerAfterDimensionChange($name, $state);
+			// If real dimension change was sent, wait for real ACK before spawning.
+			if ($state->dimensionChangeSent && !$state->realDimensionAckReceived) {
 				continue;
 			}
 
-			$this->nudgePlayerForChunks($state);
-			$this->pollRequiredChunks($name, $state);
+			// If real ACK was received, spawn the player.
+			if ($state->realDimensionAckReceived && !$state->spawnSent) {
+				$this->spawnPlayerAfterRealAck($name, $state);
+				continue;
+			}
+
+			if (!$state->dimensionChangeSent) {
+				$this->nudgePlayerForChunks($state);
+				$this->pollRequiredChunks($name, $state);
+			}
 		}
 	}
 
@@ -263,9 +292,10 @@ final class TransferManager {
 		$world = $player->getWorld();
 		$position = $player->getPosition();
 
-		// Teleport to destination explicitly so PocketMine queues the new
-		// world's chunks immediately, before the fake screen is shown.
-		$player->teleport($position);
+		// NOTE: Do NOT call $player->teleport($position) here. The original
+		// EntityTeleportEvent already moved the player to the destination
+		// world. We deferred this call by 1 tick precisely so that
+		// $player->getWorld() and $position reflect the destination.
 
 		$chunkX = $position->getFloorX() >> 4;
 		$chunkZ = $position->getFloorZ() >> 4;
@@ -305,8 +335,11 @@ final class TransferManager {
 		$state->chunksForceThreshold = 10 * 20;
 
 		// Lock player during transfer so they don't fall into void while
-		// chunks load. Unlocked when DIMENSION_CHANGE_ACK is received.
+		// chunks load. Unlocked when real DIMENSION_CHANGE_ACK is received.
 		$player->setNoClientPredictions(true);
+
+		// Mark player as in transition so movement packets are blocked.
+		\ReinfyTeam\FakeWaterdogTransfer\Main::getInstance()->markTransitionStart($name);
 
 		// The fake Nether screen is shown in tick() immediately.
 	}
@@ -369,10 +402,8 @@ final class TransferManager {
 	/**
 	 * Polls a single transfer: checks if all required chunks are SENT.
 	 *
-	 * When all chunks are sent, sends the real ChangeDimensionPacket first,
-	 * then waits one tick before spawning the client. This prevents the
-	 * client from getting stuck when ChangeDimensionPacket and PLAYER_SPAWN
-	 * are sent in the same tick.
+	 * When all chunks are sent, sends the real ChangeDimensionPacket to the
+	 * destination dimension and waits for the client's real ACK.
 	 */
 	private function pollRequiredChunks(string $name, TransferState $state) : void {
 		if (!$this->isCurrentTransfer($name, $state)) {
@@ -404,7 +435,7 @@ final class TransferManager {
 		}
 
 		// All chunks ready — send real dimension change first.
-		// Spawn will follow in the next tick via dimensionChangeSent.
+		// Spawn will follow after the client acknowledges the real dimension change.
 		$dimensionId = TransferScreen::getDimensionIdForWorld(
 			$this->applicableWorlds,
 			$player->getWorld()->getFolderName()
@@ -480,12 +511,10 @@ final class TransferManager {
 	}
 
 	/**
-	 * Spawns the player after the real ChangeDimensionPacket was sent in the
-	 * previous tick. Gives the client one tick to process the dimension
-	 * change before spawning. Movement is unlocked via DIMENSION_CHANGE_ACK
-	 * interception in Main::onPacketReceive().
+	 * Spawns the player after the real dimension change ACK was received.
+	 * Sends spawn packets once, then finishes the transfer.
 	 */
-	private function spawnPlayerAfterDimensionChange(string $name, TransferState $state) : void {
+	private function spawnPlayerAfterRealAck(string $name, TransferState $state) : void {
 		$player = $state->player;
 
 		if (!$player->isConnected() || !$player->isAlive()) {
@@ -493,12 +522,17 @@ final class TransferManager {
 			return;
 		}
 
-		$dimensionId = TransferScreen::getDimensionIdForWorld(
-			$this->applicableWorlds,
-			$player->getWorld()->getFolderName()
-		);
-		TransferScreen::spawnPlayer($player, $dimensionId);
+		if (!$state->spawnSent) {
+			$dimensionId = TransferScreen::getDimensionIdForWorld(
+				$this->applicableWorlds,
+				$player->getWorld()->getFolderName()
+			);
+			TransferScreen::spawnPlayer($player, $dimensionId);
+			$state->spawnSent = true;
+			return;
+		}
 
+		// Spawn sent, finish the transfer.
 		$this->finishTransfer($name, $state, false);
 	}
 
@@ -516,6 +550,9 @@ final class TransferManager {
 		unset($this->transferring[$name]);
 
 		$player = $state->player;
+
+		// Mark transition complete so movement packets are no longer blocked.
+		\ReinfyTeam\FakeWaterdogTransfer\Main::getInstance()->markTransitionComplete($name);
 
 		// Unlock player movement immediately.
 		$player->setNoClientPredictions(false);
@@ -554,6 +591,9 @@ final class TransferManager {
 	 */
 	private function kickStuckPlayer(Player $player) : void {
 		$name = $player->getName();
+
+		// Mark transition complete first.
+		\ReinfyTeam\FakeWaterdogTransfer\Main::getInstance()->markTransitionComplete($name);
 
 		// Unlock movement first.
 		$player->setNoClientPredictions(false);
@@ -676,4 +716,32 @@ final class TransferManager {
 		return $reflectionProperty;
 	}
 
+	/**
+	 * Registers that a fake Nether ACK was received from the client.
+	 * This does NOT unlock movement — only the real Overworld ACK does.
+	 */
+	public function markFakeNetherAckReceived(string $name) : void {
+		$state = $this->transferring[$name] ?? null;
+		if ($state !== null) {
+			$state->fakeNetherAckReceived = true;
+		}
+	}
+
+	/**
+	 * Registers that the real dimension ACK was received from the client.
+	 * This unlocks movement and allows spawning.
+	 */
+	public function markRealDimensionAckReceived(string $name) : void {
+		$state = $this->transferring[$name] ?? null;
+		if ($state !== null) {
+			$state->realDimensionAckReceived = true;
+		}
+	}
+
+	/**
+	 * Gets the TransferState for a player, or null if not in a transfer.
+	 */
+	public function getTransferState(string $name) : ?TransferState {
+		return $this->transferring[$name] ?? null;
+	}
 }

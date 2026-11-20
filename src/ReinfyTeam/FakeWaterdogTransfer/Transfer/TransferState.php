@@ -37,6 +37,10 @@ use pocketmine\world\World;
  *
  * All timing is tick-based (via TransferManager::tick()) instead of
  * per-player ClosureTasks, so the plugin scales to 100+ concurrent players.
+ *
+ * State machine:
+ *   teleport_complete → show_nether_screen → wait_for_chunks →
+ *   send_real_dimension_change → wait_for_real_ack → spawn_player → done
  */
 final class TransferState {
 	// --- Transfer lifecycle tasks ---
@@ -66,8 +70,17 @@ final class TransferState {
 	/** Whether the fake Nether screen has been shown (shown immediately after teleport). */
 	public bool $netherScreenShown = false;
 
-	/** Whether the real ChangeDimensionPacket has been sent (waiting for spawn next tick). */
+	/** Whether the client acknowledged the fake Nether dimension change (ignored for unlocking). */
+	public bool $fakeNetherAckReceived = false;
+
+	/** Whether the real ChangeDimensionPacket has been sent (destination dimension). */
 	public bool $dimensionChangeSent = false;
+
+	/** Whether the client acknowledged the real dimension change (completes the transfer). */
+	public bool $realDimensionAckReceived = false;
+
+	/** Whether spawn packets have been sent after the real dimension change. */
+	public bool $spawnSent = false;
 
 	/** Whether the dimension change was forced due to chunk stall (skipping chunk wait). */
 	public bool $dimensionChangeForced = false;
